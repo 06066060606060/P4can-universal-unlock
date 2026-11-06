@@ -1,0 +1,49 @@
+{
+  "upstream": "Espressif ESP-IDF v5.5.5",
+  "files": {
+    "src/ecc.c": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/src/ecc.c",
+      "sha256": "b604b889d36bd1c9b1a0e0020f928a6c5e137b5c229d8bac2932a422f07f63ff"
+    },
+    "src/ecc_dh.c": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/src/ecc_dh.c",
+      "sha256": "e183bdb0c77179adb9916de4db65a2cd16d0360137b610da15aa01aa825b326c"
+    },
+    "src/ecc_dsa.c": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/src/ecc_dsa.c",
+      "sha256": "e031b36423076f79106b79ac87153f97dbe1e3fd8461216cec29bea23e76f807"
+    },
+    "port/esp_tinycrypt_port.c": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/port/esp_tinycrypt_port.c",
+      "sha256": "eea4471e5d549ac187d2b2171d7dabf9079b5710569af1e3a75af095adb11c40"
+    },
+    "port/esp_tinycrypt_port.h": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/port/esp_tinycrypt_port.h",
+      "sha256": "2357d7a612f903218b92bdb7f8f562980300eee5166a34d35e59f549bdb638aa"
+    },
+    "include/tinycrypt/ecc.h": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/include/tinycrypt/ecc.h",
+      "sha256": "68fcd8cf84529067b0b38cd467a1e84c29b23f195f53ba0f88aca6f60bc7cb76"
+    },
+    "include/tinycrypt/ecc_dh.h": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/include/tinycrypt/ecc_dh.h",
+      "sha256": "170a8f09a61e6b3f7975f346e8e213531b2981c5632c02bc69ed1d79e3cde990"
+    },
+    "include/tinycrypt/ecc_dsa.h": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/include/tinycrypt/ecc_dsa.h",
+      "sha256": "155566ed5cb885559591fd1a8b680ec70d5a935aff31e6395cb6f0d75bb922d5"
+    },
+    "include/tinycrypt/ecc_platform_specific.h": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/include/tinycrypt/ecc_platform_specific.h",
+      "sha256": "d7121881a1cf9c7130f85891b6994963b6b09dcf395e19e24863679a86c72305"
+    },
+    "include/tinycrypt/constants.h": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/include/tinycrypt/constants.h",
+      "sha256": "37badcc85b2ec75465c5461e0c1fb4fc23af00d1fd4304afbc20d3769c1cfa37"
+    },
+    "include/tinycrypt/utils.h": {
+      "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/bt/common/tinycrypt/include/tinycrypt/utils.h",
+      "sha256": "64878c30949f18e98e77290b635880599ccb19206bff208591d4a101dccd21b0"
+    }
+  }
+}
