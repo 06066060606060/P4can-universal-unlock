@@ -1,6 +1,9 @@
-# P4-CAN Universal v3.29.3
-## wiring
+# P4-CAN Universal v3.29.3 BETA
 
+All the features of the T2CAN-Universal unlock are included.
+https://github.com/06066060606060/t2can-universal-unlock
+
+## wiring
 | Physical bus | Controller | TX | RX |
 |---|---|---|---|
 | CAN 1 BODY | TWAI 0 | GPIO20 | GPIO21 |
