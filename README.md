@@ -1,8 +1,26 @@
 
 # P4-CAN Universal Unlock v3.29.3 BETA
 
-All the features of the T2CAN-Universal unlock are included + the nag-killer.  
-https://github.com/06066060606060/t2can-universal-unlock
+All the features of the T2CAN-Universal unlock are included with the nag-killer.  
+
+** Highlights:**  
+- Nag-killer  
+- Advanced EAP (Automatically activates the turn signal in noa)  
+- EU unlock (Bypass R79 EU restriction)  
+- Summon Unlock (+/-85m)  ESP32-P4 fix stabilty issue  
+- Activate Tlssc, if not available in your region  
+- Continuous AP  (experimental)  
+- ISA chime Suppression  
+- Country / Map Region Spoof  
+- Vision Speed Control Settings  
+- Pedal map settings  
+- S3XY Button Bluetooth Support (need some fix)  
+- Option to Disable Driver Monitoring  
+A valid EAP/FSD subscription is required for some features.  
+
+Multiple operating modes supporting five vehicle profiles Model 3/Y/YL :  
+
+- **Android Mobile dashboard** [Android APK](https://github.com/06066060606060/t2can-universal-unlock/releases/tag/android_1.2.1)  
 
 ## wiring
 | Physical bus | Controller | TX | RX |
