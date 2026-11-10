@@ -13,6 +13,21 @@ https://github.com/06066060606060/t2can-universal-unlock
 
 <img width="718" height="442" alt="ESP32-P4-WIRING" src="https://github.com/user-attachments/assets/7cbf03c8-ebb4-41c9-b624-cad1b8879684" />
 
+### Optional: "ESP32P4 WIFI6 3CAN" expansion board (X179 harness)
+
+The table above remains the default and is unchanged. If you use the Waveshare
+"ESP32P4 WIFI6 3CAN" expansion board with an X179 harness, its silkscreen CAN1/CAN2
+are swapped relative to the X179 connector. Build with `-DP4CAN_BOARD_X179` to select
+the pin mapping for that board (mapped by bus name, not by silkscreen number):
+
+| Physical bus | Controller | TX | RX |
+|---|---|---|---|
+| CAN 1 BODY | TWAI 0 | GPIO4 | GPIO5 |
+| CAN 2 CHASSIS | TWAI 1 | GPIO2 | GPIO3 |
+| CAN 3 PARTY | TWAI 2 | GPIO26 | GPIO27 |
+
+All `HOSTED_*` (ESP32-C6 / SDIO) pins stay the same for both variants.
+
 ## Build
 
 Use Arduino-ESP32 3.3.12 with `ESP32P4 Dev Module`, post-v3 silicon, 32 MB flash, `app5M_fat24M_32MB`, enabled PSRAM, Hardware CDC/JTAG and CDC on boot:
