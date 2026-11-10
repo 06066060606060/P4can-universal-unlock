@@ -1,7 +1,7 @@
 
 # P4-CAN Universal Unlock v3.29.3 BETA
-
-All the features of the T2CAN-Universal unlock are included with the nag-killer.  
+The ultimate solution to have all features with one board using the 3 Tesla CAN Bus.    
+All the features of the T2CAN-Universal unlock are included + the nag-killer.  
 
 ** Highlights:**  
 - Nag-killer  
