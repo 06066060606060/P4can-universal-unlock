@@ -15,7 +15,8 @@ All the features of the T2CAN-Universal unlock are included + the nag-killer.
 - Country / Map Region Spoof  
 - Vision Speed Control Settings  
 - Pedal map settings  
-- S3XY Button Bluetooth Support (need some fix)  
+- S3XY Button Bluetooth Support (need some fix)
+- toggle to restore Confirm free lane change setting (doesn't work in EU use auto blinker)**.
 - Option to Disable Driver Monitoring  
 A valid EAP/FSD subscription is required for some features.  
 
