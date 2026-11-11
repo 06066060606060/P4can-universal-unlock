@@ -45,7 +45,7 @@ Rrecommend setup for max performance and stabilty.
 ESP32-P4 + 3 x SN65HVD230  
 with removed 120 ohms resistors & highspeed mode enabled
 
-https://link.amazon/B05fkkBto
+https://link.amazon/B05fkkBto  
 https://link.amazon/B0eL8me5V
 
 
