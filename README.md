@@ -50,6 +50,11 @@ https://link.amazon/B05fkkBto
 https://link.amazon/B0eL8me5V
 
 
+Check your ESP32-P4 chip revision and build for the correct version, V1.X or V3.X,  
+ 
+<img width="295" height="337" alt="image" src="https://github.com/user-attachments/assets/31ea6408-9702-4741-8c8c-eb6e9a7402b7" />
+  
+
 <img width="165" height="254" alt="highspeed" src="https://github.com/user-attachments/assets/de1fab24-3905-4dbf-b603-205c5784e361" />
 <img width="500" height="372" alt="ESP32-P4" src="https://github.com/user-attachments/assets/b2f7f3c3-9c50-4bff-a29d-fbed4a528866" />
   
