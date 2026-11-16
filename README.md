@@ -69,3 +69,8 @@ Check your ESP32-P4 chip revision and build for the correct version, V1.X or V3.
 Join the project Discord server:
 
 https://discord.gg/euPbYG8Npc
+
+
+## License
+
+GNU GPL v3 or later. See [LICENSE](LICENSE).
