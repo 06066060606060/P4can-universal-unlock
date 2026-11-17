@@ -65,7 +65,9 @@ Check your ESP32-P4 chip revision and build for the correct version, V1.X or V3.
 <a href="https://www.buymeacoffee.com/xbmod" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 30px !important;width: 108px !important;" ></a>
 
 欢迎请作者喝杯咖啡，助力后续更新~  
- 
+
+ <img width="178.666" height="178" alt="mm_facetoface_collect_qrcode_17949068ezrze97436" src="https://github.com/user-attachments/assets/0054af9d-7f14-4f8c-9431-541e6c08550f" />
+
 
 ### Discord
 
