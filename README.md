@@ -66,8 +66,6 @@ Check your ESP32-P4 chip revision and build for the correct version, V1.X or V3.
 
 欢迎请作者喝杯咖啡，助力后续更新~  
  
-<img width="160" height="163" alt="wechat" src="https://github.com/user-attachments/assets/06dbe003-4e2f-4954-9af1-ca02b7fe4299" />
-
 
 ### Discord
 
