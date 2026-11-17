@@ -64,8 +64,8 @@ Check your ESP32-P4 chip revision and build for the correct version, V1.X or V3.
 [![Crypto](https://img.shields.io/badge/Crypto-Donate-F7931A?style=for-the-badge&logo=bitcoin&logoColor=white)](https://tesla-mods.fkey.id/) [![PayPal](https://img.shields.io/badge/PayPal-Donate-00457C?style=for-the-badge&logo=paypal&logoColor=white)](https://www.paypal.com/donate/?hosted_button_id=Q2YMMMJYTAPJE)
 <a href="https://www.buymeacoffee.com/xbmod" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 30px !important;width: 108px !important;" ></a>
 
-欢迎请作者喝杯咖啡，助力后续更新~
-<img width="321" height="326" alt="wechat" src="https://github.com/user-attachments/assets/06dbe003-4e2f-4954-9af1-ca02b7fe4299" />
+欢迎请作者喝杯咖啡，助力后续更新~ 
+<img width="160" height="163" alt="wechat" src="https://github.com/user-attachments/assets/06dbe003-4e2f-4954-9af1-ca02b7fe4299" />
 
 
 ### Discord
