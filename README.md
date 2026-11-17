@@ -38,22 +38,6 @@ Multiple operating modes supporting five vehicle profiles for Model 3/Y/YL.
   <img width="718" alt="ESP32-P4 wiring diagram" src="https://github.com/user-attachments/assets/7cbf03c8-ebb4-41c9-b624-cad1b8879684">
 </p>
 
-## Build
-
-Use Arduino-ESP32 3.3.12 with the following settings:
-
-- Board: `ESP32P4 Dev Module`
-- Chip variant: post-v3 silicon
-- Flash size: 32 MB
-- Partition scheme: `app5M_fat24M_32MB`
-- PSRAM: enabled
-- USB mode: Hardware CDC/JTAG
-- CDC on boot: enabled
-
-```text
-esp32:esp32:esp32p4:ChipVariant=postv3,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,PSRAM=enabled,USBMode=hwcdc,CDCOnBoot=cdc,FlashMode=qio
-```
-
 ### Recommended hardware setup
 
 Recommended setup for maximum performance and stability:
@@ -72,7 +56,23 @@ Hardware links:
 - [Amazon — link 1](https://link.amazon/B05fkkBto)
 - [Amazon — link 2](https://link.amazon/B0eL8me5V)
 
-### Check your chip revision
+## Build
+
+Use Arduino-ESP32 3.3.12 with the following settings:
+
+- Board: `ESP32P4 Dev Module`
+- Chip variant: **Check your chip revision**
+- Flash size: 32 MB
+- Partition scheme: `app5M_fat24M_32MB`
+- PSRAM: enabled
+- USB mode: Hardware CDC/JTAG
+- CDC on boot: enabled
+
+```text
+esp32:esp32:esp32p4:ChipVariant=postv3,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,PSRAM=enabled,USBMode=hwcdc,CDCOnBoot=cdc,FlashMode=qio
+```
+
+### Chip revision
 
 Check your ESP32-P4 chip revision and build with correct settings: **V1.X or V3.X**.
 
