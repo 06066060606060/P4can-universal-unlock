@@ -100,7 +100,7 @@ Check your ESP32-P4 chip revision and build with correct settings: **V1.X or V3.
   欢迎请作者喝杯咖啡，助力后续更新～
 </p>
 
-<img width="379" alt="mm_facetoface_collect_qrcode_1795002156171" src="https://github.com/user-attachments/assets/73a8fe73-92af-44e7-ba8a-6446fbce32a6" />
+<img width="279" alt="mm_facetoface_collect_qrcode_1795002156171" src="https://github.com/user-attachments/assets/73a8fe73-92af-44e7-ba8a-6446fbce32a6" />
 
 
 ## Discord
