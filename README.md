@@ -100,9 +100,8 @@ Check your ESP32-P4 chip revision and build with correct settings: **V1.X or V3.
   欢迎请作者喝杯咖啡，助力后续更新～
 </p>
 
-<p align="center">
-  <img width="279" alt="Donation QR code" src="https://github.com/user-attachments/assets/53b0d528-529d-43f7-bef0-712938274629">
-</p>
+<img width="279" alt="mm_facetoface_collect_qrcode_1794996343698 (2)" src="https://github.com/user-attachments/assets/d0f08d38-7117-4460-a802-a78bcadeba69" />
+
 
 ## Discord
 
