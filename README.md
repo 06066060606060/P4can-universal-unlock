@@ -98,6 +98,7 @@ Check your ESP32-P4 chip revision and build with correct settings: **V1.X or V3.
 
 <p align="center">
   欢迎请作者喝杯咖啡，助力后续更新～
+  Wechat QR on discord
 </p>
 
 
