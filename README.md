@@ -2,7 +2,7 @@
 
 The ultimate solution for accessing all features using an ESP32-P4/C6 board + 3 × SN65HVD230 CAN transceivers.
 
-All features of T2CAN-Universal Unlock are included, plus the nag-killer.
+DOESN'T WORK CORRECTLY BEFORE 2026.20 Update
 
 **Highlights:**
 
