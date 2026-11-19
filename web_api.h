@@ -3476,6 +3476,30 @@ static void httpCanHardReinit() {
   server.send(202, "application/json", "{\"ok\":true,\"action\":\"hard-can-reinit-requested\"}");
 }
 
+static void httpWiringTestStatus() {
+  server.send(200, "application/json", wiringTestJson());
+}
+static void httpWiringTestStart() {
+  // Bench-only: refuse if any controller has seen vehicle traffic recently.
+  const uint32_t now = millis();
+  for (uint8_t bus = 0; bus < P4_CAN_COUNT; ++bus) {
+    const uint32_t last = p4CanLastRxMs[bus];
+    if (last != 0 && (uint32_t)(now - last) < 5000) {
+      server.send(409, "application/json",
+          "{\"ok\":false,\"error\":\"CAN traffic detected. Disconnect from the car before the wiring self-test.\"}");
+      return;
+    }
+  }
+  if (!prepareCanForMaintenance()) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"CAN stop not confirmed; retry\"}");
+    return;
+  }
+  wiringTestRequest();
+  server.send(200, "application/json", "{\"ok\":true,\"action\":\"rebooting_for_wiring_test\"}");
+  delay(250);
+  restartP4CanSafely();
+}
+
 static void httpRebootP4Can() {
   if (!prepareCanForMaintenance()) {
     server.send(503, "application/json", "{\"ok\":false,\"error\":\"CAN stop not confirmed; retry reboot\"}");
@@ -5639,6 +5663,8 @@ static void webTask(void *arg) {
   server.on("/api/system/factory-reset", HTTP_POST, httpFactoryReset);
   server.on("/api/system/reset-nvs-keep-ble", HTTP_POST, httpResetNvsPreserveS3xyBle);
   server.on("/api/system/reboot", HTTP_POST, httpRebootP4Can);
+  server.on("/api/system/wiring-test", HTTP_GET, httpWiringTestStatus);
+  server.on("/api/system/wiring-test", HTTP_POST, httpWiringTestStart);
   server.on("/api/wifi/status", HTTP_GET, httpWifiStatus);
   server.on("/api/wifi/apply", HTTP_POST, httpWifiApply);
   server.on("/api/ota/status", HTTP_GET, httpOtaStatus);

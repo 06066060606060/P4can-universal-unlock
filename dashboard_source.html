@@ -600,6 +600,7 @@ body.p4-2027 .panel{scroll-padding-bottom:calc(100px + env(safe-area-inset-botto
 <div class="listrow settingChoiceRow"><div><div class="listkey">Appearance</div><div class="listdesc" id="dashboardThemeDesc">Follows phone setting</div></div><div class="settingChoiceButtons" role="group" aria-label="Dashboard appearance"><button type="button" data-theme-choice="system" aria-pressed="false">FOLLOW PHONE</button><button type="button" data-theme-choice="light" aria-pressed="false">LIGHT</button><button type="button" data-theme-choice="dark" aria-pressed="false">DARK</button></div><select aria-label="Dashboard appearance value" class="settingSourceSelect" id="dashboardThemeMode" tabindex="-1" aria-hidden="true"><option value="system">FOLLOW PHONE</option><option value="light">LIGHT</option><option value="dark">DARK</option></select></div>
 <div class="listrow settingChoiceRow"><div><div class="listkey">Data Refresh Interval</div><div class="listdesc" id="dashboardPollDesc">Home updates · default 0.5 s</div></div><div class="settingChoiceButtons" role="group" aria-label="Dashboard polling rate"><button type="button" data-poll-choice="250" aria-pressed="false">250 ms</button><button type="button" data-poll-choice="500" aria-pressed="false">500 ms</button><button type="button" data-poll-choice="1000" aria-pressed="false">1000 ms</button></div><select aria-label="Dashboard polling rate value" class="settingSourceSelect" id="dashboardPollRate" tabindex="-1" aria-hidden="true"><option value="250">250 ms</option><option value="500">500 ms</option><option value="1000">1000 ms</option></select></div>
 <div class="listrow clickable" data-panel="panelDiag"><div><div class="listkey">Diagnostics / Recovery</div><div class="listdesc">Counters, boot capture and system logs</div></div><span class="chev">›</span></div>
+<div class="listrow clickable" id="wiringTestRow"><div><div class="listkey">Wiring Self-Test</div><div class="listdesc" id="wiringTestDesc">Bench check of the 3 CAN boards · no car</div></div><span class="chev">›</span></div>
 <div class="listrow clickable" data-panel="panelOta"><div><div class="listkey">Firmware Update</div><div class="listdesc">Install an application .bin file</div></div><span class="chev">›</span></div>
 <div class="listrow clickable" id="rebootRow"><div><div class="listkey">Reboot P4-CAN</div><div class="listdesc">Restart controller</div></div><span class="chev">›</span></div>
 <div class="listrow clickable" id="resetSettingsBtn"><div><div class="listkey">Reset Feature Settings</div><div class="listdesc">Reset features · keep vehicle and connections</div></div><span class="chev">›</span></div>
@@ -2035,5 +2036,44 @@ setInterval(()=>{if(universalBootReady){pollTick(false);renderHeartbeatSnapshot(
   file.onchange=()=>{const selected=file.files?.[0];name.textContent=selected?.name||'No file selected';name.classList.toggle('hasFile',!!selected)};
 })();</script>
 
+<style>
+.wtList{margin-top:10px;display:grid;gap:8px}.wtBus{border:1px solid var(--line);border-radius:13px;padding:10px 11px}.wtHead{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;font-weight:700}.wtPins{font-size:8.5px;color:var(--muted);font-weight:600}.wtPill{font-size:7.5px;font-weight:780;letter-spacing:.06em;padding:3px 7px;border-radius:999px;background:rgba(200,66,58,.12);color:var(--red)}.wtPill.pass{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}.wtMsg{font-size:9.5px;line-height:1.45;color:var(--muted);margin-top:5px}
+</style>
+<div aria-modal="true" class="warningModal" id="wiringTestModal" role="dialog">
+<div class="warningCard"><div class="warningIcon" style="color:var(--ink)">⚡</div><div class="warningTitle" style="color:var(--ink)">WIRING SELF-TEST</div><div class="warningLead">Disconnect P4-CAN from the car first.</div><div class="warningText">P4-CAN reboots and, before CAN starts, checks that each SN65HVD230 is powered and that its CTX/CRX are on the right GPIOs (CAN 1: TX20/RX21 · CAN 2: TX22/RX23 · CAN 3: TX26/RX27). If any CAN traffic is detected the test aborts without driving the bus. After the test P4-CAN boots normally.</div><div class="warningBtns"><button class="warningBtn" id="cancelWiringTest">Back</button><button class="warningBtn danger" id="confirmWiringTest">Run Test &amp; Reboot</button></div></div>
+</div>
+<div aria-modal="true" class="warningModal" id="wiringResultModal" role="dialog">
+<div class="warningCard"><div class="warningIcon" id="wiringResultIcon" style="color:var(--ink)">⚡</div><div class="warningTitle" id="wiringResultTitle" style="color:var(--ink)">WIRING RESULTS</div><div class="warningText" id="wiringResultLead"></div><div class="wtList" id="wiringResultList"></div><div class="warningBtns"><button class="warningBtn" id="closeWiringResult">Close</button><button class="warningBtn danger" id="rerunWiringTest">Run Again</button></div></div>
+</div>
+<script>(()=>{
+  const g=id=>document.getElementById(id),show=id=>g(id)?.classList.add('show'),hide=id=>g(id)?.classList.remove('show');
+  const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const store={get(){try{return sessionStorage.getItem('p4WiringPending')}catch(e){return null}},set(v){try{v?sessionStorage.setItem('p4WiringPending','1'):sessionStorage.removeItem('p4WiringPending')}catch(e){}}};
+  async function load(){const r=await fetch('/api/system/wiring-test',{cache:'no-store'});if(!r.ok)throw Error(r.status);return r.json()}
+  function render(d){
+    const list=g('wiringResultList'),lead=g('wiringResultLead'),title=g('wiringResultTitle'),icon=g('wiringResultIcon');
+    if(!d||!d.ran){title.textContent='NO RESULTS YET';lead.textContent='Run the self-test to check the three CAN boards.';list.innerHTML='';return}
+    const passed=d.buses.filter(b=>b.pass).length;
+    title.textContent=d.aborted?'TEST ABORTED':passed===3?'ALL 3 BOARDS OK':passed+' OF 3 BOARDS OK';
+    title.style.color=passed===3?'var(--ok)':'var(--red)';icon.textContent=passed===3?'✓':'!';icon.style.color=title.style.color;
+    lead.textContent='Tested at the last boot in '+d.durationMs+' ms.';
+    list.innerHTML=d.buses.map(b=>`<div class="wtBus"><div class="wtHead"><span>CAN ${b.bus} · ${esc(b.name)} <span class="wtPins">TX GPIO${b.tx} · RX GPIO${b.rx}</span></span><span class="wtPill${b.pass?' pass':''}">${b.pass?'PASS':esc(b.code.replace(/_/g,' ').toUpperCase())}</span></div><div class="wtMsg">${esc(b.message)}</div></div>`).join('');
+    const desc=g('wiringTestDesc');if(desc)desc.textContent=d.aborted?'Last run aborted · CAN traffic':'Last run: '+passed+'/3 boards OK';
+  }
+  async function openResults(){try{render(await load())}catch(e){render(null)}show('wiringResultModal')}
+  async function start(){
+    hide('wiringTestModal');hide('wiringResultModal');
+    let r;try{r=await fetch('/api/system/wiring-test',{method:'POST'})}catch(e){r=null}
+    if(r&&!r.ok){let m='HTTP '+r.status;try{m=(await r.json()).error||m}catch(e){}alert('Wiring self-test not started: '+m);return}
+    store.set(true);
+    if(typeof waitForP4CanReconnect==='function')waitForP4CanReconnect({title:'Wiring Self-Test',sub:'P4-CAN is rebooting to test the 3 CAN boards.\nReconnect to P4-CAN Wi-Fi manually if Auto-Join is disabled.',minWaitMs:2600});
+  }
+  g('wiringTestRow')?.addEventListener('click',async()=>{let d=null;try{d=await load()}catch(e){}if(d&&d.ran){render(d);show('wiringResultModal')}else show('wiringTestModal')});
+  g('cancelWiringTest').onclick=()=>hide('wiringTestModal');
+  g('confirmWiringTest').onclick=start;
+  g('closeWiringResult').onclick=()=>hide('wiringResultModal');
+  g('rerunWiringTest').onclick=()=>{hide('wiringResultModal');show('wiringTestModal')};
+  load().then(d=>{if(d&&d.ran){const desc=g('wiringTestDesc');if(desc){const p=d.buses.filter(b=>b.pass).length;desc.textContent=d.aborted?'Last run aborted · CAN traffic':'Last run: '+p+'/3 boards OK'}}if(store.get()){store.set(false);render(d);show('wiringResultModal')}}).catch(()=>{});
+})();</script>
 
 </body></html>
