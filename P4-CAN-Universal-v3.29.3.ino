@@ -40,6 +40,7 @@
 #include "dashboard_icon.h"
 #include "vehicle_profile.h"
 #include "p4_can.h"
+#include "wiring_selftest.h"
 #include "esp32-hal-hosted.h"
 #include "p4_network.h"
 #include "summon_state_pure.h"
@@ -176,6 +177,10 @@ void setup() {
     P4CAN_SERIAL_PRINTLN("CAN TX recovery barrier allocation failed! Rebooting...");
     restartP4CanSafely();
   }
+
+  // Bench wiring self-test (Settings -> Wiring Self-Test). Runs only when
+  // requested, before any TWAI controller is installed, then boot continues.
+  wiringTestRunIfRequested();
 
   // No valid profile means fail-closed setup mode: Wi-Fi/Web/OTA/profile
   // selection only. CAN controllers, CAN tasks, recovery supervisor and BLE
