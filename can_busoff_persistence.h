@@ -1,4 +1,5 @@
 #pragma once
+#include "can_error_diag_macros.h"
 
 enum CanBusOffRecordBoot : uint8_t {
   CAN_BUS_OFF_BOOT_NONE = 0,
@@ -316,7 +317,7 @@ static bool canBusOffPersistenceWriteBus(uint8_t bus, uint32_t dirtyEpoch) {
     canBusOffPersistenceError[index] = CAN_BUS_OFF_PERSIST_ERROR_OPEN;
     return false;
   }
-  const size_t written = p.putBytes(key, canBusOffPersistenceEncoded, length);
+  const size_t written = P4_CAN_DIAG_NVS_WRITE(4, p.putBytes(key, canBusOffPersistenceEncoded, length));
   bool verified = false;
   if (written == length && p.getBytesLength(key) == length &&
       p.getBytes(key, canBusOffPersistenceEncoded, length) == length) {
@@ -336,9 +337,11 @@ static bool canBusOffPersistenceWriteBus(uint8_t bus, uint32_t dirtyEpoch) {
       true, canBusOffPersistenceRecord.generation};
   canBusOffPersistenceActiveSlot[index] = slot;
   portENTER_CRITICAL(&canBusOffPersistenceMux);
-  if (canBusOffPersistenceDirtyEpoch[index] == dirtyEpoch)
+  const bool current = canBusOffPersistenceDirtyEpoch[index] == dirtyEpoch;
+  if (current)
     canBusOffPersistenceDirtyMask &= (uint8_t)~canBusOffPersistenceMask(bus);
-  canBusOffPersistenceState[index] = CAN_BUS_OFF_PERSIST_SAVED;
+  canBusOffPersistenceState[index] = current
+      ? CAN_BUS_OFF_PERSIST_SAVED : CAN_BUS_OFF_PERSIST_DIRTY;
   canBusOffPersistenceError[index] = CAN_BUS_OFF_PERSIST_ERROR_NONE;
   canBusOffPersistenceRetryAtMs[index] = 0;
   portEXIT_CRITICAL(&canBusOffPersistenceMux);
@@ -346,6 +349,15 @@ static bool canBusOffPersistenceWriteBus(uint8_t bus, uint32_t dirtyEpoch) {
 }
 
 static void canBusOffPersistenceService(uint32_t now) {
+  // A frozen trace stays in RAM/DIRTY while CAN is live. Cached controller
+  // status (including BUS_OFF) cannot prove flash safety: the SDK ISR is not
+  // cache-safe. Only the sticky task-park + successful teardown handshake can.
+  if (!__atomic_load_n(&canMaintenanceStopped, __ATOMIC_ACQUIRE)) return;
+  for (uint8_t bus = 0; bus < P4_CAN_COUNT; ++bus)
+    if (p4CanHandles[bus]) return;
+  // Acquire before taking the dirty snapshot so an explicit clear cannot leave
+  // a stale pre-clear snapshot queued to be written after it releases ownership.
+  if (!canBusOffPersistenceTryAcquire()) return;
   uint8_t dirty;
   uint32_t epoch[2], retry[2];
   portENTER_CRITICAL(&canBusOffPersistenceMux);
@@ -355,7 +367,10 @@ static void canBusOffPersistenceService(uint32_t now) {
   retry[0] = canBusOffPersistenceRetryAtMs[0];
   retry[1] = canBusOffPersistenceRetryAtMs[1];
   portEXIT_CRITICAL(&canBusOffPersistenceMux);
-  if (!dirty || !canBusOffPersistenceTryAcquire()) return;
+  if (!dirty) {
+    canBusOffPersistenceRelease();
+    return;
+  }
   for (uint8_t index = 0; index < 2; ++index) {
     const uint8_t bus = index == 0 ? CAN_BUS_OFF_BUS_A_PURE : CAN_BUS_OFF_BUS_B_PURE;
     const uint8_t mask = canBusOffPersistenceMask(bus);
@@ -380,7 +395,7 @@ static bool canBusOffPersistenceClear() {
   Preferences p;
   bool ok = p.begin("p4CanDiag", false);
   if (ok) {
-    p.remove("a0"); p.remove("a1"); p.remove("b0"); p.remove("b1");
+    P4_CAN_DIAG_NVS_WRITE(4, p.remove("a0")); P4_CAN_DIAG_NVS_WRITE(4, p.remove("a1")); P4_CAN_DIAG_NVS_WRITE(4, p.remove("b0")); P4_CAN_DIAG_NVS_WRITE(4, p.remove("b1"));
     ok = p.getBytesLength("a0") == 0 && p.getBytesLength("a1") == 0 &&
          p.getBytesLength("b0") == 0 && p.getBytesLength("b1") == 0;
     p.end();

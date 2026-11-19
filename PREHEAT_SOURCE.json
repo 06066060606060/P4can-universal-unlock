@@ -1,0 +1,36 @@
+{
+  "author": "3dfx",
+  "archive": "P4-CAN-Universal-v3.29.2 by 3dfx.zip",
+  "archive_sha256": "a101bae58f7190a6fffc15eb3f5efabbc4dc559f4cd9b9ad63e91b97f7b7fe1f",
+  "base_package": "P4-CAN-Universal-v3.30.1",
+  "reference_files_sha256": {
+    "preheat_pure.h": "d6c8bbbb3a33c1fa82eaf47ffa5a4b4dfe675b198f3bc871c07ba907cd440a73",
+    "preheat_runtime.h": "1a1a527366102219fbf0ed08474f22d90619f0b145b327161f35e980ba3b88bf",
+    "dashboard_source.html": "196042e5015c302b94d813995deb35d22ee0eed206f8342e892c64093df5d340",
+    "web_api.h": "64ecd94144ed72a8a7316c5ffa8a14e08fbb448039ad99b8b22e738039d47e74",
+    "s3xy_ble.h": "8de6aa5bc6c7b10e1ae6413e0fd8c25937a814296eb66e60ddb1c0e5a4f0e26c"
+  },
+  "integration_policy": "Retain original preheat algorithm and source feature content; adapt framework integration and current UI only. Verify actual imported files and deviations before build.",
+  "physical_tx_bus": "CAN 1 BODY",
+  "yl_display_rename_does_not_reroute_can": true,
+  "vehicle_validation": false,
+  "integrated_files_sha256": {
+    "preheat_pure.h": "d6c8bbbb3a33c1fa82eaf47ffa5a4b4dfe675b198f3bc871c07ba907cd440a73",
+    "preheat_runtime.h": "39298c617493091d5ebaac978ec103f81411bcd0bc87578300510131b231f099"
+  },
+  "pure_algorithm_byte_identical": true,
+  "runtime_byte_identical": false,
+  "runtime_framework_changes": [
+    "Serialize settings persistence and RAM commits across Web/S3XY; use nonblocking CAN-owner acquisition.",
+    "Defer auto-off persistence to the Web owner; controlled reboot/OTA flush pending OFF; reset discards pending writes and forces RAM OFF.",
+    "Quiesce writers and reject late S3XY work after maintenance starts.",
+    "Preserve R79-first service and apply existing non-Summon queue admission at the preheat TX boundary."
+  ],
+  "unchanged_behavior": [
+    "Fixed payloads and learned ID selection",
+    "100ms base cadence and reply limiter",
+    "Temperature and no-heat criteria",
+    "Persistent enable/target and menu independence",
+    "BODY physical TX routing and supported profile mapping"
+  ]
+}

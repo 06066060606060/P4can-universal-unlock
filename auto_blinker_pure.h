@@ -310,14 +310,15 @@ enum BlinkerTxModePure : uint8_t {
 enum BlinkerTxSourcePure : uint8_t {
   BLINKER_TX_SOURCE_NONE_PURE = 0,
   BLINKER_TX_SOURCE_AUTO_PURE = 1,
-  BLINKER_TX_SOURCE_S3XY_PURE = 2
+  BLINKER_TX_SOURCE_S3XY_PURE = 2,
+  BLINKER_TX_SOURCE_S3XY_AP_PURE = 3
 };
 
 struct BlinkerTxRequestStatePure {
   uint8_t pendingDir;
   uint8_t pendingSource;
   uint32_t requestedMs;
-  uint32_t lastToken[2];
+  uint32_t lastToken[3];
 };
 
 struct BlinkerTxConsumeResultPure {
@@ -337,7 +338,8 @@ static inline bool blinkerTxArmPure(BlinkerTxRequestStatePure &state,
                                     uint32_t eventToken, uint32_t now) {
   if ((dir != 1 && dir != 2) ||
       (source != BLINKER_TX_SOURCE_AUTO_PURE &&
-       source != BLINKER_TX_SOURCE_S3XY_PURE)) {
+       source != BLINKER_TX_SOURCE_S3XY_PURE &&
+       source != BLINKER_TX_SOURCE_S3XY_AP_PURE)) {
     return false;
   }
   const uint8_t tokenIndex = (uint8_t)(source - BLINKER_TX_SOURCE_AUTO_PURE);
@@ -400,4 +402,13 @@ static inline BlinkerTxModeTransitionPure blinkerTxModeTransitionPure(
   transition.cancelLegacy = current == BLINKER_TX_MODE_LEGACY_PURE &&
       transition.effectiveMode == BLINKER_TX_MODE_SINGLE_PURE;
   return transition;
+}
+
+#define STALK_UP_2 4
+#define STALK_DOWN_2 8
+static inline uint8_t blinkerApTurnPure(uint8_t dir) {
+  return dir == 1 ? STALK_DOWN_2 : dir == 2 ? STALK_UP_2 : 0;
+}
+static inline bool blinkerDirectSourcePure(uint8_t source) {
+  return source == BLINKER_TX_SOURCE_S3XY_PURE || source == BLINKER_TX_SOURCE_S3XY_AP_PURE;
 }

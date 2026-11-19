@@ -27,6 +27,7 @@ static void invalidateCanTxStateInternal(uint8_t invalidatedBusMask) {
   const bool barrierLocked = canTxBarrierMutex &&
                              xSemaphoreTake(canTxBarrierMutex, portMAX_DELAY) == pdTRUE;
   if (barrierLocked) {
+    gearShiftInvalidateInputs();
     const uint8_t preserved = canTxPreservedFreshMaskPure(
         canTxBarrierState.freshMask, invalidatedBusMask, physicalFreshMask);
     canTxBarrierInvalidatePreservePure(canTxBarrierState, preserved);
@@ -84,6 +85,7 @@ static void invalidateCanTxStateInternal(uint8_t invalidatedBusMask) {
   // Keep Summon monitor and the R79 manual latch coherent after source reset.
   refreshSummonDerivedStateLocked(now, barrierLocked);
   portEXIT_CRITICAL(&stateMux);
+  p4PublishVehicleDiagnosticContext((uint32_t)millis());
 
   if (inv.invalidateDas) {
     portENTER_CRITICAL(&nagTsl9Mux);
@@ -96,7 +98,6 @@ static void invalidateCanTxStateInternal(uint8_t invalidatedBusMask) {
     r79LabStockValid = false;
     r79LabLastStockMs = 0;
     r79FixedQuietState = {};
-    r79Mode2DelayedState = {};
     r79RetryPending = false;
     r79RetryIndex = 0;
     r79RetryOriginKind = R79LAB_TX_NONE;
@@ -111,6 +112,7 @@ static void invalidateCanTxStateInternal(uint8_t invalidatedBusMask) {
   tsl9InputRequestCancel(TSL9_INPUT_FAILURE_CAN_UNAVAILABLE_PURE, true);
   continuousApResetForEpoch(barrierLocked ? canTxBarrierState.epoch : 0u);
   driverWindowLabResetRuntimeUnderTxBarrier();
+  preheatRuntimeResetUnderTxBarrier();
   summonHeartbeatOverrideResetUnderTxBarrier();
 
   // These transient feature requests are inexpensive to restart and are cleared
@@ -340,28 +342,44 @@ static void canTwaiHandleAlerts() {
   const uint32_t errorAlerts = twaiAlerts &
       (TWAI_ALERT_TX_FAILED | TWAI_ALERT_ERR_PASS | TWAI_ALERT_BUS_ERROR);
   const bool busOff = (twaiAlerts & TWAI_ALERT_BUS_OFF) != 0;
-  if (!(errorAlerts || busOff)) return;
+  P4_CAN_DIAG_ALERTS(p4CanBusB(), twaiAlerts);
+  if (!(errorAlerts || busOff || (twaiAlerts & TWAI_ALERT_RX_QUEUE_FULL))) return;
   const uint32_t alertNow = (uint32_t)millis();
-  canTwaiObserveErrorAlerts(errorAlerts, busOff, alertNow);
-  if (busOff) {
-    twai_status_info_t alertSt = {};
-    canBTraceFreezeBusOff(alertNow);
-    if (twai_get_status_info_v2(p4CanHandleB(), &alertSt) == ESP_OK)
-      recordTwaiBusOffSnapshot(alertSt, alertNow);
+  if (errorAlerts || busOff) canTwaiObserveErrorAlerts(errorAlerts, busOff, alertNow);
+  if (busOff) canBTraceFreezeBusOff(alertNow);
+  // One bounded status read per error-alert batch catches transient TEC/REC
+  // that may have returned to zero by the ordinary 100ms poll.
+  twai_status_info_t alertSt = {};
+  if (twai_get_status_info_v2(p4CanHandleB(), &alertSt) == ESP_OK) {
+    P4_CAN_DIAG_STATUS(p4CanBusB(), alertSt, 0u);
+    if (busOff) recordTwaiBusOffSnapshot(alertSt, alertNow);
   }
 }
 
-// Third controller: Party on standard profiles, Chassis on YL. YL Chassis
-// remains observable; existing YL feature routes stay on Party and Body.
+// Additional controller: BODY on YL, PARTY on standard profiles. YL BODY
+// makes bounded progress after the required PARTY route has been serviced.
 static void p4CanDrainExtra() {
   CanFrame frame;
-  for (uint8_t count = 0; count < 32; ++count) {
+  const bool boundedBody = activeProfileIsYl();
+  const uint8_t frameBudget = boundedBody ? 8u : 32u;
+  const uint32_t drainStartMs = (uint32_t)millis();
+  for (uint8_t count = 0; count < frameBudget; ++count) {
+    // Check before the next read so flagged/passive frames also spend the
+    // cooperative budget. A single decoder callback is not preempted.
+    if (boundedBody && count != 0u &&
+        (uint32_t)((uint32_t)millis() - drainStartMs) >= 1u) break;
     if (p4CanReadFrame(p4CanBusExtra(), &frame) != ESP_OK) break;
     __atomic_store_n(&lastCanFrameMs, (unsigned long)millis(), __ATOMIC_RELAXED);
     canUsbObserve(frame.bus, frame.can_id & 0x1fffffffUL,
         ((frame.can_id & 0x80000000UL) ? 1 : 0) |
         ((frame.can_id & 0x40000000UL) ? 2 : 0), frame.can_dlc, frame.data);
+    gearHintDisplayObserveRaw(frame.bus,frame.can_id&0x1fffffffUL,frame.can_dlc,(frame.can_id&0x80000000UL)!=0,(frame.can_id&0x40000000UL)!=0,frame.data);
     if ((frame.can_id & 0xc0000000UL) != 0) continue;
+    preheatRuntimeIngestPhysical(frame.bus, frame.can_id, frame.can_dlc, frame.data);
+    const uint32_t fsdEpoch=canTxEpochSnapshot(), fsdMs=(uint32_t)millis();
+    fsdSettingsObserve(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdEpoch,fsdMs);
+    fsdSettingsExtra(frame,fsdEpoch,fsdMs);
+    chinaRestoreEcho(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdEpoch,fsdMs);
     if (p4CanOnline[p4CanBusExtra()]) p4CanExtraFresh = true;
     researchCaptureObserve(RESEARCH_CAPTURE_BUS_EXTRA, frame.can_id, frame.can_dlc, frame.data);
     driverMonitorCaptureObserve(2, frame.can_id, frame.can_dlc, frame.data);
@@ -371,16 +389,20 @@ static void p4CanDrainExtra() {
 
 static void p4CanServiceNativeStatus(uint8_t bus, bool routeA) {
   const twai_handle_t handle = p4CanHandles[bus];
+  const bool isolatedBody = activeProfileIsYl() && !routeA && bus == p4CanBusExtra();
   if (!handle) return;
   uint32_t alerts = 0;
   twai_read_alerts_v2(handle, &alerts, 0);
+  P4_CAN_DIAG_ALERTS(bus, alerts);
   twai_status_info_t st = {};
   if (twai_get_status_info_v2(handle, &st) != ESP_OK) {
     p4CanOnline[bus] = false;
+    if (isolatedBody) p4CanExtraFresh = false;
     if (routeA) nativeAReady = false;
     return;
   }
   p4CanPublishStatus(bus, st);
+  if (isolatedBody && st.state != TWAI_STATE_RUNNING) p4CanExtraFresh = false;
   if (routeA) {
     nativeALastControllerState = (uint8_t)st.state;
     nativeALastControllerStateMs = millis();
@@ -402,18 +424,27 @@ static void p4CanServiceNativeStatus(uint8_t bus, bool routeA) {
         invalidateCanTxStateForCanARecovery();
       } else {
         p4CanExtraFresh = false;
-        invalidateCanTxStateForFullRecovery();
+        // Additional YL BODY owns no R79 template, gear or AP observation.
+        // Its recovery must not revoke the healthy VEHICLE/PARTY session.
+        if (!isolatedBody) invalidateCanTxStateForFullRecovery();
       }
     }
-    if (twai_initiate_recovery_v2(handle) == ESP_OK) {
+    const esp_err_t diagRecoveryResult = twai_initiate_recovery_v2(handle);
+    P4_CAN_DIAG_RECOVERY(bus, true, diagRecoveryResult == ESP_OK);
+    if (diagRecoveryResult == ESP_OK) {
       p4CanRecoveries[bus]++;
     } else {
       p4CanRecoveryFailures[bus]++;
-      requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);
+      // Keep this controller installed and retry on the next 100ms status
+      // tick; never tear down live readers or the healthy required pair.
+      if (!isolatedBody) requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);
     }
   } else if (st.state == TWAI_STATE_STOPPED && !canMaintenanceActive()) {
-    if (twai_start_v2(handle) == ESP_OK) p4CanOnline[bus] = true;
-    else requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);
+    if (isolatedBody) p4CanOnline[bus] = false;
+    const esp_err_t diagRestartResult = twai_start_v2(handle);
+    if (diagRestartResult != ESP_OK) P4_CAN_DIAG_RECOVERY(bus, false, false);
+    if (diagRestartResult == ESP_OK) p4CanOnline[bus] = true;
+    else if (!isolatedBody) requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);
   } else p4CanOnline[bus] = st.state == TWAI_STATE_RUNNING;
   if (routeA) {
     nativeAReady = p4CanOnline[bus];
@@ -438,7 +469,11 @@ static void canTaskNativeA(void* arg) {
       canTaskNativeAQuiesced = false;
       continue;
     }
-    p4CanDrainExtra();
+    P4_CAN_DIAG_SERVICE(p4CanBusA());
+    if (!activeProfileIsYl()) {
+      P4_CAN_DIAG_SERVICE(p4CanBusExtra());
+      p4CanDrainExtra();
+    }
     // ── BOUNDED READ LOOP ──
     // Process each TWAI frame before reading the next. The 32-frame yield
     // budget and task priority remain unchanged; saved settings cannot batch RX.
@@ -471,11 +506,18 @@ static void canTaskNativeA(void* arg) {
                                        CAN_TASK_STAGE_PROCESS,
                                        (uint32_t)millis());
       const struct CanFrame &rxf = prefetched[bi];
+      gearHintDisplayObserveRaw(rxf.bus,rxf.can_id&0x1fffffffUL,rxf.can_dlc,(rxf.can_id&0x80000000UL)!=0,(rxf.can_id&0x40000000UL)!=0,rxf.data);
       processed++;
       const uint32_t frameNow = (uint32_t)millis();
       lastCanAFrameMs = frameNow;
       nativeARxCount++;
       canRxObserve(CAN_RX_BUS_PARTY, frameNow);
+      if ((rxf.can_id & 0xc0000000UL) == 0)
+        preheatRuntimeIngestPhysical(rxf.bus, rxf.can_id, rxf.can_dlc, rxf.data);
+      if((rxf.can_id&0xc0000000UL)==0){
+        fsdSettingsObserve(rxf.bus,rxf.can_id,rxf.can_dlc,rxf.data,countryRxEpoch,prefetchedRxMs[bi]);
+        fsdSettingsExtra(rxf,countryRxEpoch,prefetchedRxMs[bi]);
+      }
       if (canUsbPassive()) continue;
       // All downstream Model YL decoders and TX decisions expect standard
       // 11-bit DATA frames. Aggregate telemetry still counts rejected frames.
@@ -536,6 +578,10 @@ static void canTaskNativeA(void* arg) {
                                      (uint32_t)millis());
     continuousApService(ContApRoute::BodyA);
     tsl9InputServiceCanA();
+    if (activeProfileIsYl()) {
+      P4_CAN_DIAG_SERVICE(p4CanBusExtra());
+      p4CanDrainExtra();
+    }
 
     // ── STATUS CHECK / RECOVERY (100 ms, as in the reference) ──
     canTaskDiagnosticsEnterStagePure(canTaskNativeADiagnostics,
@@ -558,11 +604,34 @@ static void canTaskNativeA(void* arg) {
   }
 }
 
+// Already admitted native work must make progress even while application
+// authorization refresh is contended. Native guard/deadline checks still apply;
+// only NEW retry/periodic admission requires a successful state refresh.
+static void r79ServiceCheckpoint() {
+  const bool periodicReady = p4_twai_r79_periodic_ready_v2(p4CanHandleB());
+  if (r79ServiceStateRefreshTry()) r79TransportSliceTick(periodicReady);
+}
+
+// Scheduling hint only: the checkpoint still applies native MUX fencing and
+// fresh application authorization before any new admission. Do not consume or
+// reschedule a reservation while inspecting it.
+static bool r79ServiceWorkDueSnapshot(uint32_t nowMs) {
+  portENTER_CRITICAL(&r79LabMux);
+  const bool due = (r79RetryPending &&
+      (int32_t)(nowMs - r79RetryDueMs) >= 0) ||
+      (r79FixedQuietState.pending &&
+       (int32_t)(nowMs - r79FixedQuietState.dueMs) >= 0);
+  portEXIT_CRITICAL(&r79LabMux);
+  return due;
+}
+
 static void canTaskTwai(void* arg) {
   P4CAN_SERIAL_PRINTLN("[CAN B] TWAI task started");
   unsigned long lastTwaiStatusMs = 0;
   unsigned long lastNoCanWarn = 0;
   uint32_t lastQueueStatusMs = 0;
+  bool runnableBurstActive = false;
+  uint32_t runnableBurstStartMs = 0;
 
   canTaskDiagnosticsResetPure(canTaskTwaiDiagnostics);
   for (;;) {
@@ -577,6 +646,7 @@ static void canTaskTwai(void* arg) {
       canTaskTwaiQuiesced = true;
       while (canTasksStopping || canMaintenanceActive()) vTaskDelay(pdMS_TO_TICKS(5));
       canTaskTwaiQuiesced = false;
+      runnableBurstActive = false;
       continue;
     }
     // Drain completion/error alerts before the potentially busy RX batch so
@@ -584,15 +654,50 @@ static void canTaskTwai(void* arg) {
     canTaskDiagnosticsEnterStagePure(canTaskTwaiDiagnostics,
                                      CAN_TASK_STAGE_ALERTS,
                                      (uint32_t)millis());
+    P4_CAN_DIAG_SERVICE(p4CanBusB());
     canTwaiHandleAlerts();
-    twai_message_t f;
+    twai_message_t f = {};
+    // Bound VEHICLE work while it outranks PARTY on YL. Service immediate
+    // recovery after at most eight frames or 1 ms of decoding, and return to
+    // a scheduler handoff after at most 4 ms of runnable work. A single
+    // decoder/transport call is not preempted by these cooperative limits.
+    const uint32_t rxBatchStartMs = (uint32_t)millis();
+    uint32_t r79SliceStartMs = rxBatchStartMs;
+    uint8_t r79SliceFrames = 0;
     uint8_t rxBudget = 0;
     canTaskDiagnosticsEnterStagePure(canTaskTwaiDiagnostics,
                                      CAN_TASK_STAGE_RECEIVE,
                                      (uint32_t)millis());
     uint32_t countryRxEpoch = canTxEpochSnapshot();
-    esp_err_t rxResult = p4CanReceiveRaw(p4CanBusB(), &f);
+    // A bounded queue wait wakes on arrival instead of sleeping after idle
+    // polling. Only a first-wait timeout proves a blocking opportunity;
+    // zero-wait drain timeouts must not reset continuous-run fairness.
+    // Already queued input owns the first opportunity. A due retry can spend
+    // its bounded admission wait before returning, so service it here only
+    // after a nonblocking receive actually found no frame.
+    esp_err_t rxResult = p4CanReceiveRaw(p4CanBusB(), &f, 0);
+    if (rxResult == ESP_ERR_TIMEOUT) {
+      if (r79ServiceWorkDueSnapshot((uint32_t)millis())) {
+        // Count this runnable service toward the same fairness epoch as RX.
+        // The following idle receive still blocks, even if refresh is busy or
+        // an unseen native MUX boundary keeps the due work fenced.
+        if (!runnableBurstActive) {
+          runnableBurstActive = true;
+          runnableBurstStartMs = (uint32_t)millis();
+        }
+        r79ServiceCheckpoint();
+      }
+      countryRxEpoch = canTxEpochSnapshot();
+      rxResult = p4CanReceiveRaw(p4CanBusB(), &f, 1);
+    }
+    const esp_err_t firstRxResult = rxResult;
     uint32_t stockRxMs = (uint32_t)millis();
+    if (firstRxResult == ESP_ERR_TIMEOUT) {
+      runnableBurstActive = false;
+    } else if (firstRxResult == ESP_OK && !runnableBurstActive) {
+      runnableBurstActive = true;
+      runnableBurstStartMs = stockRxMs;
+    }
     while (rxBudget < TWAI_RX_DRAIN_BUDGET && rxResult == ESP_OK) {
       rxBudget++;
       canUsbObserve(p4CanBusB(), f.identifier, (f.extd ? 1 : 0) | (f.rtr ? 2 : 0),
@@ -605,6 +710,7 @@ static void canTaskTwai(void* arg) {
       // fail-open/manual-latch authorization policy inside the fast function.
       if (!canUsbPassive() && !f.extd && !f.rtr && f.data_length_code <= 8 && f.identifier <= 0x7ff)
         continuousApObserveStock(1, (uint16_t)f.identifier, f.data, f.data_length_code, countryRxEpoch, stockRxMs);
+      gearHintDisplayObserveRaw(p4CanBusB(),f.identifier,f.data_length_code,f.extd,f.rtr,f.data);
       bool mux1StockClaimed = false;
       if (!canUsbPassive() && !f.extd && !f.rtr && f.data_length_code <= 8 && f.identifier <= 0x7ff && f.identifier == 0x3FD && f.data_length_code >= 8) {
         const uint8_t timingMux = readMuxID(f.data);
@@ -613,6 +719,8 @@ static void canTaskTwai(void* arg) {
         const uint32_t r79FrameNowMs = (uint32_t)millis();
         mux1StockClaimed = r79ProcessStockFrame(f, timingMux, r79FrameNowMs);
       }
+      if(!f.extd && !f.rtr) chinaRestoreEcho(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
+      if(!f.extd && !f.rtr) fsdSettingsObserve(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
       // Keep the supervisor heartbeat alive even under sustained CAN B traffic.
       const uint32_t frameNow = (uint32_t)millis();
       canTaskTwaiHeartbeatMs = frameNow;
@@ -625,6 +733,8 @@ static void canTaskTwai(void* arg) {
       }
       lastCanBFrameMs = frameNow;
       canRxObserve(CAN_RX_BUS_VH, frameNow);
+      if (!f.extd && !f.rtr)
+        preheatRuntimeIngestPhysical(p4CanBusB(), f.identifier, f.data_length_code, f.data);
       // Only standard 11-bit DATA frames may reach Tesla decoders or TX paths.
       if (!canUsbPassive() && !f.extd && !f.rtr && f.data_length_code <= 8 && f.identifier <= 0x7ff) {
         canTxMarkFresh(CAN_TX_FRESH_VH);
@@ -677,9 +787,6 @@ static void canTaskTwai(void* arg) {
             handle921(f.data, f.data_length_code);
           }
           break;
-        case 0x331:
-          if (activeCanBIsChassis()) doInjectTlsscRestore(f);
-          break;
         // Model YL/public-DBC reference: UI_driverAssistMapData road context.
         case 0x238:
           if (f.data_length_code >= 5) handleRoadContext238(f.data, f.data_length_code);
@@ -702,9 +809,10 @@ static void canTaskTwai(void* arg) {
             uint8_t mux = readMuxID(f.data);
             if (mux == 1) {
               r79LabObserve3fdMux1(f.data, f.data_length_code);
-              const bool ulcCloneClaimed = injectUlcSnooze3fdMux1(f);
+              const bool ulcCloneClaimed = !mux1StockClaimed && injectUlcSnooze3fdMux1(f);
               visionControlObserveStock(f, countryRxEpoch, mux1StockClaimed || ulcCloneClaimed, stockRxMs);
             } else if (mux == 0) injectTLSSC(f);
+
           }
           break;
 
@@ -712,23 +820,43 @@ static void canTaskTwai(void* arg) {
           break;
         }
       }
+      // A newer queued MUX1 may have briefly held an older native immediate
+      // request for replacement. Processing is now complete even if the
+      // application could not authorize a replacement: release its fallback.
+      if (!f.extd && !f.rtr && f.identifier == 0x3FD &&
+          f.data_length_code == 8u && readMuxID(f.data) == 1u)
+        p4CanR79InputDone();
+      ++r79SliceFrames;
+      const uint32_t r79SliceNowMs = (uint32_t)millis();
+      if (r79SliceFrames >= 8u ||
+          (uint32_t)(r79SliceNowMs - r79SliceStartMs) >= 1u) {
+        // Native readiness tracks relevant MUX boundaries, so unrelated
+        // backlog cannot starve quiet/retry work. A busy state barrier or
+        // unseen boundary leaves periodic due/index/generation untouched.
+        r79ServiceCheckpoint();
+        r79SliceFrames = 0;
+        r79SliceStartMs = (uint32_t)millis();
+      }
+      if (rxBudget >= TWAI_RX_DRAIN_BUDGET ||
+          (uint32_t)((uint32_t)millis() - rxBatchStartMs) >= 4u ||
+          (uint32_t)((uint32_t)millis() - runnableBurstStartMs) >= 4u) break;
       canTaskDiagnosticsEnterStagePure(canTaskTwaiDiagnostics,
                                        CAN_TASK_STAGE_RECEIVE,
                                        (uint32_t)millis());
       countryRxEpoch = canTxEpochSnapshot();
-      rxResult = rxBudget < TWAI_RX_DRAIN_BUDGET ? p4CanReceiveRaw(p4CanBusB(), &f) : ESP_ERR_TIMEOUT;
+      rxResult = p4CanReceiveRaw(p4CanBusB(), &f);
       stockRxMs = (uint32_t)millis();
     }
 
-    // Refresh Summon evidence before R79 retry/periodic servicing. The 5 s
-    // V2.6 PARK fallback remains gate-compatible, but d1 queue priority uses
-    // fresh real gear rather than gateParked.
+    // Native admission/load recheck the relevant boundary independently;
+    // whole-queue occupancy must not defer work behind unrelated traffic.
     canTaskDiagnosticsEnterStagePure(canTaskTwaiDiagnostics,
                                      CAN_TASK_STAGE_SERVICE,
                                      (uint32_t)millis());
-    refreshSummonState();
+    r79ServiceCheckpoint();
+    p4PublishVehicleDiagnosticContext((uint32_t)millis());
     driverWindowLabServiceTick();
-    r79TransportTick();
+    preheatRuntimeTick();
     // R79 immediate/retry/periodic work always gets first access to the CAN-B
     // TX queue. TSL9 input assistance is intentionally lower priority.
     continuousApService(ContApRoute::ChassisB);
@@ -798,6 +926,7 @@ static void canTaskTwai(void* arg) {
           P4CAN_SERIAL_PRINTLN("[CAN B] TWAI bus-off -> recovery started");
           invalidateCanTxStateForCanBRecovery();
           const esp_err_t recoveryErr = twai_initiate_recovery_v2(p4CanHandleB());
+          P4_CAN_DIAG_RECOVERY(p4CanBusB(), true, recoveryErr == ESP_OK);
           if (recoveryErr == ESP_OK) {
             p4CanRecoveries[p4CanBusB()]++;
             canTwaiLocalRecoveryStartCount++;
@@ -818,6 +947,7 @@ static void canTaskTwai(void* arg) {
           }
           invalidateCanTxStateForCanBRecovery();
           esp_err_t rs = twai_start_v2(p4CanHandleB());
+          if (rs != ESP_OK) P4_CAN_DIAG_RECOVERY(p4CanBusB(), false, false);
           if (rs == ESP_OK) {
             canTwaiRestartOkCount++;
             canTwaiResetErrorAlertWindow();
@@ -849,7 +979,16 @@ static void canTaskTwai(void* arg) {
                                      (uint32_t)millis());
     canTaskDiagnosticsFinishLoopPure(canTaskTwaiDiagnostics,
                                      (uint32_t)micros());
-    vTaskDelay(1);
+    // Small nonempty batches can repeat without blocking on the first wait.
+    // Carry their runnable epoch across iterations so higher-priority VEHICLE
+    // cannot starve PARTY. Driver errors also need a real scheduler handoff.
+    if ((firstRxResult != ESP_OK && firstRxResult != ESP_ERR_TIMEOUT) ||
+        rxBudget >= TWAI_RX_DRAIN_BUDGET ||
+        (runnableBurstActive &&
+         (uint32_t)((uint32_t)millis() - runnableBurstStartMs) >= 4u)) {
+      vTaskDelay(1);
+      runnableBurstActive = false;
+    }
   }
 }
 
@@ -909,7 +1048,9 @@ static bool recoveryNativeAColdInit() {
   p4CanExtraFresh = false;
   const bool a = nativeAInitChecked();
   const bool c = p4CanReinstall(p4CanBusExtra(), canUsbPassive());
-  return a && c;
+  // An absent additional BODY must not turn recovery of the healthy YL
+  // required pair into a reboot loop. Its failed state remains visible.
+  return a && (activeProfileIsYl() || c);
 }
 
 static bool recoveryTwaiInstallFresh() {
@@ -934,6 +1075,7 @@ static bool recoveryTwaiFullReinit() {
 // starts a controller. OTA must not touch flash until every owner has parked.
 static bool prepareCanForMaintenance() {
   __atomic_store_n(&canMaintenanceRequested, true, __ATOMIC_RELEASE);
+  if (!preheatSettingsQuiesceForMaintenance()) return false;
   const bool supervisorSelf = canSupervisorHandle &&
       xTaskGetCurrentTaskHandle() == canSupervisorHandle;
   if (supervisorSelf)
@@ -950,10 +1092,10 @@ static bool prepareCanForMaintenance() {
       nativeAReady || twaiReady || canSupervisorHandle ||
       canTaskNativeAHandle || canTaskTwaiHandle;
   // Publish the hold first; then drain any sender that already owns the barrier.
-  canTxAdministrativeHold = true;
+  __atomic_store_n(&canTxAdministrativeHold, true, __ATOMIC_RELEASE);
   if (canTxBarrierMutex) {
     if (xSemaphoreTake(canTxBarrierMutex, pdMS_TO_TICKS(500)) != pdTRUE) return finish(false);
-    canTxAdministrativeHold = true;
+    __atomic_store_n(&canTxAdministrativeHold, true, __ATOMIC_RELEASE);
     xSemaphoreGive(canTxBarrierMutex);
   }
   uint32_t started = (uint32_t)millis();
@@ -975,6 +1117,10 @@ static bool prepareCanForMaintenance() {
   if (!p4CanStopAll()) return finish(false);
   invalidateCanTxStateForFullRecovery();
   __atomic_store_n(&canMaintenanceStopped, true, __ATOMIC_RELEASE);
+  // Best-effort once at the first confirmed stop, before OTA/reset flash work.
+  // Do not retry from the stopped early return: factory reset may already have
+  // erased NVS. A diagnostic write failure must not prevent controlled reboot.
+  canBusOffPersistenceService((uint32_t)millis());
   return finish(true);
 }
 
@@ -1024,7 +1170,10 @@ static bool recoveryStartCanTasks() {
     canTaskNativeAHandle = nullptr;
     return false;
   }
-  BaseType_t b = xTaskCreatePinnedToCore(canTaskTwai, "canB", 8192, nullptr, 4, &canTaskTwaiHandle, 1);
+  // YL maps logical CAN-B to physical CAN1 VEHICLE. Keep it above PARTY/BODY
+  // CAN-A while retaining the established non-YL task priority policy.
+  const UBaseType_t canBPriority = activeProfileIsYl() ? 6u : 4u;
+  BaseType_t b = xTaskCreatePinnedToCore(canTaskTwai, "canB", 8192, nullptr, canBPriority, &canTaskTwaiHandle, 1);
   if (b != pdPASS) {
     canTasksStopping = true;
     canTaskTwaiHandle = nullptr;
@@ -1040,6 +1189,7 @@ static bool recoveryHardReinitialize(uint8_t reason, uint8_t diagReason) {
   canLastHardReinitReason = reason;
   canLastHardDiagReason = diagReason;
   canHardReinitCount++;
+  P4_CAN_DIAG_REINIT(canHardReinitCount, reason, diagReason, 1);
   P4CAN_SERIAL_PRINTF("[CAN SUP] hard CAN reinitialize #%lu reason=%u diag=%s\n",
                 (unsigned long)canHardReinitCount, (unsigned)reason,
                 canRecoveryDiagnosticReasonName(diagReason));
@@ -1052,6 +1202,7 @@ static bool recoveryHardReinitialize(uint8_t reason, uint8_t diagReason) {
 
   if (!recoveryStopCanTasks()) {
     canHardReinitFailCount++;
+    P4_CAN_DIAG_REINIT(canHardReinitCount, reason, diagReason, 3);
     canSubsystemBusy = false;
     bootCaptureHardFinish(bootCapHardIdx, false);
     return false;
@@ -1072,11 +1223,13 @@ static bool recoveryHardReinitialize(uint8_t reason, uint8_t diagReason) {
   if (!(aOk && bOk && tasksOk)) {
     bootCaptureHardFinish(bootCapHardIdx, false);
     canHardReinitFailCount++;
+    P4_CAN_DIAG_REINIT(canHardReinitCount, reason, diagReason, 3);
     P4CAN_SERIAL_PRINTF("[CAN SUP] hard CAN reinitialize FAILED A=%u B=%u tasks=%u\n",
                   aOk ? 1 : 0, bOk ? 1 : 0, tasksOk ? 1 : 0);
     return false;
   }
   bootCaptureHardFinish(bootCapHardIdx, true);
+  P4_CAN_DIAG_REINIT(canHardReinitCount, reason, diagReason, 2);
   P4CAN_SERIAL_PRINTLN("[CAN SUP] hard CAN reinitialize complete");
   return true;
 }
@@ -1117,8 +1270,8 @@ static void canUsbModeService() {
   }
   if (ok && canTxBarrierMutex && xSemaphoreTake(canTxBarrierMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
     __atomic_store_n(&canUsbTransitionHeld, false, __ATOMIC_RELEASE);
-    canTxAdministrativeHold = canTxAdministrativeRequested ||
-                              canMaintenanceActive() || canUsbTxHeld();
+    __atomic_store_n(&canTxAdministrativeHold, canTxAdministrativeRequested ||
+                              canMaintenanceActive() || canUsbTxHeld(), __ATOMIC_RELEASE);
     xSemaphoreGive(canTxBarrierMutex);
   } else ok = false;
   __atomic_store_n(&canUsbModeResult, ok, __ATOMIC_RELEASE);
@@ -1134,7 +1287,7 @@ static bool canUsbRequestMode(bool passive) {
   if (!canTxBarrierMutex || xSemaphoreTake(canTxBarrierMutex, pdMS_TO_TICKS(500)) != pdTRUE)
     return false;
   __atomic_store_n(&canUsbTransitionHeld, true, __ATOMIC_RELEASE);
-  canTxAdministrativeHold = true;
+  __atomic_store_n(&canTxAdministrativeHold, true, __ATOMIC_RELEASE);
   xSemaphoreGive(canTxBarrierMutex);
   if (passive && !canUsbSaveMode(true)) return false;
   __atomic_store_n(&canUsbPassiveMode, passive, __ATOMIC_RELEASE);
@@ -1165,8 +1318,8 @@ static void canSupervisorTask(void* arg) {
     }
     canRecoverySupervisorTick(now);
 
-    // BUS-OFF persistence performs synchronous NVS write/read-back work.
-    // Re-sample time afterwards, then use half-range age handling so a
+    // Automatic persistence is deferred until confirmed maintenance stop.
+    // Re-sample time here and use half-range age handling so a
     // concurrently published heartbeat can never look almost 2^32 ms old.
     now = (uint32_t)millis();
 
@@ -1191,8 +1344,8 @@ static void canSupervisorTask(void* arg) {
       bool aFresh = recoveryFresh(now, lastCanAFrameMs, RECOVERY_BUS_FRESH_MS);
       bool bFresh = recoveryFresh(now, lastCanBFrameMs, RECOVERY_BUS_FRESH_MS);
       bool extraFresh = recoveryFresh(now, p4CanLastRxMs[p4CanBusExtra()], RECOVERY_BUS_FRESH_MS);
-      bool bothFresh = aFresh && bFresh && extraFresh;
-      bool anyFresh = aFresh || bFresh || extraFresh;
+      bool bothFresh = aFresh && bFresh && (activeProfileIsYl() || extraFresh);
+      bool anyFresh = aFresh || bFresh || (!activeProfileIsYl() && extraFresh);
 
       if (canUsbPassive()) {
         // A single connected bus or sleeping vehicle is normal in survey mode.
@@ -1200,7 +1353,7 @@ static void canSupervisorTask(void* arg) {
         recoveryWakeAcquireStartMs = 0;
       } else if (bothFresh) {
         if (!recoveryEverBothActive || recoverySleeping || recoveryWakeAcquireStartMs != 0) {
-          P4CAN_SERIAL_PRINTLN("[CAN SUP] BODY+CHASSIS+PARTY active");
+          P4CAN_SERIAL_PRINTLN("[CAN SUP] required CAN buses active");
         }
         recoveryEverBothActive = true;
         recoverySleeping = false;

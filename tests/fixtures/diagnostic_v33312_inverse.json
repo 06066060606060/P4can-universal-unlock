@@ -1,0 +1,36 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.33.11",
+  "files": {
+    "vehicle_logic.h": {
+      "baseSha256": "175bead4610a7aca0e8455a80f9b30acf16620d725f6f997322c0b7c0f3b346a",
+      "hunks": [
+        {
+          "before": "}\n\n// Production request path preserves the shared TX queue. Congestion uses\n// the existing bounded +5/+15/+30 ms recovery sequence in READY/ACTIVE.\nstatic bool r79LabTransmitShadow(const uint8_t *stock, uint8_t txKind,\n                                 uint32_t hardDeadlineMs,\n                                 uint32_t expectedGeneration) {\n",
+          "after": "}\n\n// Production request path preserves the shared TX queue. Congestion uses\n// the existing bounded +5/+15/+30 ms recovery sequence in fresh PARK, READY/ACTIVE.\nstatic bool r79LabTransmitShadow(const uint8_t *stock, uint8_t txKind,\n                                 uint32_t hardDeadlineMs,\n                                 uint32_t expectedGeneration) {\n"
+        }
+      ]
+    },
+    "summon_state_pure.h": {
+      "baseSha256": "77df8e0a3505a869e96a73073cd235da1c7ea204f18ab802a2a875a7438271d5",
+      "hunks": [
+        {
+          "before": "  return SUMMON_PRIORITY_NORMAL;\r\n}\r\n\r\nstatic inline bool summonPriorityAllowsR79FlushPure(uint8_t state) {\r\n  return state == SUMMON_PRIORITY_READY || state == SUMMON_PRIORITY_ACTIVE;\r\n}\r\n\r\nstatic inline bool summonPriorityNonR79AdmissionPure(\r\n",
+          "after": "  return SUMMON_PRIORITY_NORMAL;\r\n}\r\n\r\n// Legacy name: this only authorizes bounded retry scheduling, never FIFO clears.\r\n// PARK_STANDBY is derived from fresh real P; final R79 permission still applies.\r\nstatic inline bool summonPriorityAllowsR79FlushPure(uint8_t state) {\r\n  return state == SUMMON_PRIORITY_PARK_STANDBY ||\r\n      state == SUMMON_PRIORITY_READY || state == SUMMON_PRIORITY_ACTIVE;\r\n}\r\n\r\nstatic inline bool summonPriorityNonR79AdmissionPure(\r\n"
+        }
+      ]
+    },
+    "@sketch": {
+      "baseSha256": "c153d92b3b3b98500584e4574e80733a02140659a3c7bfec046db1e4cb0f3aba",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.33.11 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.33.12 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.11\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.12\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        }
+      ]
+    }
+  }
+}

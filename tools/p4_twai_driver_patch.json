@@ -1,0 +1,182 @@
+[
+  {
+    "offset": 679,
+    "before": "",
+    "after": "#include \"p4_twai_priority.h\"\n#include \"p4_twai_diag.h\"\n#include \"esp_timer.h\"\n"
+  },
+  {
+    "offset": 3379,
+    "before": "",
+    "after": "// Native RX epochs belong to the controller lock. Tokens travel with queue\n// items; a dropped boundary advances observed but can never advance delivered.\n// Only a subsequent latest, successfully dequeued MUX2 resynchronizes periodic\n// work. Ordinary queued frames do not affect this state.\ntypedef struct {\n    twai_hal_frame_t frame;\n    uint32_t boundary;\n    uint32_t mux1Sequence;\n    uint64_t observedUs;\n} p4_twai_rx_item_t;\ntypedef struct {\n    uint32_t observed;\n    uint32_t delivered;\n    uint8_t mux;\n    uint32_t latestQueuedMux1, completedMux1;\n    p4_twai_rx_metadata_t deliveredMeta;\n} p4_twai_rx_boundary_t;\nstatic DRAM_ATTR p4_twai_rx_boundary_t s_p4_rx_boundary[SOC_TWAI_CONTROLLER_NUM];\n\nstatic uint32_t p4_twai_boundary_advance(twai_obj_t *obj, uint8_t mux)\n{\n    p4_twai_rx_boundary_t *rx = &s_p4_rx_boundary[obj->controller_id];\n    if (++rx->observed == 0) ++rx->observed;\n    rx->mux = mux;\n    if (mux == 0xff) { rx->latestQueuedMux1 = 0; rx->completedMux1 = 0; }\n    return rx->observed;\n}\n\nstatic void p4_twai_boundary_reset(twai_obj_t *obj)\n{\n    (void)p4_twai_boundary_advance(obj, 0xff);\n    s_p4_rx_boundary[obj->controller_id].delivered = 0;\n    memset(&s_p4_rx_boundary[obj->controller_id].deliveredMeta, 0,\n           sizeof(p4_twai_rx_metadata_t));\n}\n\nstatic uint32_t p4_twai_boundary_observe(twai_obj_t *obj, twai_hal_frame_t *frame)\n{\n    if (frame->dlc != 8) return 0;\n    twai_frame_header_t header = {0};\n    uint8_t data[8] = {0};\n    twai_hal_parse_frame(obj->hal, frame, &header, data, sizeof(data));\n    if (header.id != 0x3FD || header.ide || header.rtr || header.dlc != 8 ||\n        (data[0] & 7) > 2) return 0;\n    return p4_twai_boundary_advance(obj, data[0] & 7);\n}\n\nstatic bool p4_twai_periodic_ready_locked(twai_obj_t *obj)\n{\n    const p4_twai_rx_boundary_t *rx = &s_p4_rx_boundary[obj->controller_id];\n    return rx->observed != 0 && rx->observed == rx->delivered && rx->mux == 2;\n}\n\nstatic void p4_twai_rx_drain(twai_obj_t *obj, BaseType_t *task_woken,\n                             int *alert_req, bool from_isr);\n\n// P4 R79 priority state: fixed internal-RAM storage, protected by each driver's\n// spinlock. No application locks, callbacks, allocation, or FIFO reset in ISR.\ntypedef struct {\n    bool pending;\n    twai_hal_frame_t frame;\n    p4_twai_priority_guard_t guard;\n    P4TwaiTxIdentity request;\n    uint32_t requestSequence;\n    uint32_t rxBoundary; // Captured at periodic admission, never refreshed in-place.\n} p4_twai_priority_slot_t;\nstatic DRAM_ATTR p4_twai_priority_slot_t s_p4_priority[SOC_TWAI_CONTROLLER_NUM];\n\nstatic P4TwaiTxIdentity p4_twai_tx_identity(twai_obj_t *obj, twai_hal_frame_t *frame, uint8_t source)\n{\n    P4TwaiTxIdentity tx = {0};\n    twai_frame_header_t header = {0};\n    twai_hal_parse_frame(obj->hal, frame, &header, tx.data, sizeof(tx.data));\n    tx.identifier = header.id;\n    tx.dlc = header.dlc;\n    tx.flags = (header.ide ? 1 : 0) | (header.rtr ? 2 : 0);\n    tx.source = source;\n    return tx;\n}\n\nstatic uint8_t p4_twai_r79_source(const p4_twai_priority_guard_t *guard)\n{\n    return (guard->source == P4_TWAI_TX_SOURCE_R79_IMMEDIATE ||\n            guard->source == P4_TWAI_TX_SOURCE_R79_PERIODIC)\n            ? guard->source : P4_TWAI_TX_SOURCE_R79_UNKNOWN;\n}\n\nstatic void p4_twai_load(twai_obj_t *obj, twai_hal_frame_t *frame, uint8_t source, const P4TwaiTxIdentity *request)\n{\n    P4TwaiTxIdentity tx = request ? *request : p4_twai_tx_identity(obj, frame, source);\n    twai_hal_set_tx_buffer_and_transmit(obj->hal, frame, 0);\n    // The native lock prevents ECC/complete observation between load and shadow.\n    p4TwaiDiagTxLoaded(obj->controller_id, &tx);\n}\n\nstatic P4TwaiTxIdentity p4_twai_new_request(twai_obj_t *obj, twai_hal_frame_t *frame,\n                                         const p4_twai_priority_guard_t *guard)\n{\n    p4_twai_priority_slot_t *slot = &s_p4_priority[obj->controller_id];\n    P4TwaiTxIdentity tx = p4_twai_tx_identity(obj, frame, p4_twai_r79_source(guard));\n    if (++slot->requestSequence == 0) ++slot->requestSequence;\n    tx.requestId = slot->requestSequence;\n    tx.rxSequence = guard->rx_sequence;\n    tx.rxObservedUs = guard->rx_observed_us;\n    tx.rxDequeuedUs = guard->rx_dequeued_us;\n    tx.queuedUs = (uint64_t)esp_timer_get_time();\n    p4TwaiDiagTxQueued(obj->controller_id, &tx);\n    return tx;\n}\n\nstatic uint8_t p4_twai_priority_guard_reason(const p4_twai_priority_guard_t *guard)\n{\n    if (__atomic_load_n(guard->administrative_hold, __ATOMIC_ACQUIRE))\n        return P4_TWAI_TX_REASON_HOLD;\n    if (__atomic_load_n(guard->generation, __ATOMIC_ACQUIRE) != guard->expected_generation)\n        return P4_TWAI_TX_REASON_GENERATION;\n    if (guard->cancel_generation &&\n        __atomic_load_n(guard->cancel_generation, __ATOMIC_ACQUIRE) != guard->expected_cancel_generation)\n        return P4_TWAI_TX_REASON_CANCEL_GENERATION;\n    if (guard->retry_generation &&\n        __atomic_load_n(guard->retry_generation, __ATOMIC_ACQUIRE) != guard->expected_retry_generation)\n        return P4_TWAI_TX_REASON_CANCEL_GENERATION;\n    const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);\n    if (guard->has_deadline && (int32_t)(now_ms - guard->deadline_ms) > 0)\n        return P4_TWAI_TX_REASON_DEADLINE;\n    if (guard->permission_deadline_ms) {\n        const uint32_t permission_deadline = __atomic_load_n(guard->permission_deadline_ms, __ATOMIC_ACQUIRE);\n        if ((int32_t)(now_ms - permission_deadline) > 0)\n            return P4_TWAI_TX_REASON_DEADLINE;\n        // Renewal is a live publication. Never let it mask revocation that\n        // occurred after the first authority reads above.\n        if (__atomic_load_n(guard->administrative_hold, __ATOMIC_ACQUIRE))\n            return P4_TWAI_TX_REASON_HOLD;\n        if (__atomic_load_n(guard->generation, __ATOMIC_ACQUIRE) != guard->expected_generation)\n            return P4_TWAI_TX_REASON_GENERATION;\n        if (guard->cancel_generation &&\n            __atomic_load_n(guard->cancel_generation, __ATOMIC_ACQUIRE) != guard->expected_cancel_generation)\n            return P4_TWAI_TX_REASON_CANCEL_GENERATION;\n        if (guard->retry_generation &&\n            __atomic_load_n(guard->retry_generation, __ATOMIC_ACQUIRE) != guard->expected_retry_generation)\n            return P4_TWAI_TX_REASON_CANCEL_GENERATION;\n    }\n    return P4_TWAI_TX_REASON_NONE;\n}\n\nstatic bool p4_twai_priority_guard_valid(const p4_twai_priority_guard_t *guard)\n{\n    return p4_twai_priority_guard_reason(guard) == P4_TWAI_TX_REASON_NONE;\n}\n\nstatic void p4_twai_priority_clear(twai_obj_t *obj, uint8_t reason)\n{\n    p4_twai_priority_slot_t *slot = &s_p4_priority[obj->controller_id];\n    if (slot->pending) {\n        if (reason != P4_TWAI_TX_REASON_NONE) {\n            p4TwaiDiagTxCancelled(obj->controller_id, &slot->request, reason);\n        }\n        obj->tx_msg_count--;\n    }\n    const uint32_t sequence = slot->requestSequence;\n    memset(slot, 0, sizeof(*slot));\n    slot->requestSequence = sequence;\n}\n\nstatic bool p4_twai_priority_pending(twai_obj_t *obj)\n{\n    p4_twai_priority_slot_t *slot = &s_p4_priority[obj->controller_id];\n    if (slot->pending) {\n        uint8_t reason = p4_twai_priority_guard_reason(&slot->guard);\n        if (reason == P4_TWAI_TX_REASON_NONE &&\n            slot->guard.source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n            (!p4_twai_periodic_ready_locked(obj) ||\n             slot->rxBoundary != s_p4_rx_boundary[obj->controller_id].observed))\n            reason = P4_TWAI_TX_REASON_RX_BOUNDARY;\n        if (reason != P4_TWAI_TX_REASON_NONE) p4_twai_priority_clear(obj, reason);\n    }\n    return slot->pending;\n}\n\n"
+  },
+  {
+    "offset": 4458,
+    "before": "static inline void twai_handle_rx_buffer_frames(twai_obj_t *p_twai_obj, BaseType_t *task_woken, int *alert_req)\n",
+    "after": "/* Observe successful native FIFO reads before queue admission. This is hook\n * order, not physical wire order relative to the earlier HAL ECC callback. */\nstatic inline void p4_twai_capture_rx(twai_obj_t *obj, twai_hal_frame_t *frame)\n{\n    if (!p4TwaiDiagRxCaptureEnabledFromIsr(obj->controller_id)) return;\n    if (frame->dlc > 8) {\n        p4TwaiDiagRxFromIsr(obj->controller_id, 0, frame->dlc, 0, NULL);\n        return;\n    }\n    twai_frame_header_t header = {0};\n    uint8_t data[8] = {0};\n    twai_hal_parse_frame(obj->hal, frame, &header, data, sizeof(data));\n    p4TwaiDiagRxFromIsr(obj->controller_id, header.id, header.dlc,\n                      (header.ide ? 1 : 0) | (header.rtr ? 2 : 0), data);\n}\n\nstatic void p4_twai_rx_drain(twai_obj_t *p_twai_obj, BaseType_t *task_woken,\n                             int *alert_req, bool from_isr)\n"
+  },
+  {
+    "offset": 4866,
+    "before": "            if (xQueueSendFromISR(p_twai_obj->rx_queue, &frame, task_woken) == pdTRUE) {\n",
+    "after": "            p4_twai_capture_rx(p_twai_obj, &frame);\n            p4_twai_rx_item_t item = { .frame = frame,\n                .boundary = p4_twai_boundary_observe(p_twai_obj, &frame) };\n            if (item.boundary && s_p4_rx_boundary[p_twai_obj->controller_id].mux == 1) {\n                item.mux1Sequence = item.boundary;\n                item.observedUs = (uint64_t)esp_timer_get_time();\n            }\n            const BaseType_t queued = from_isr\n                ? xQueueSendFromISR(p_twai_obj->rx_queue, &item, task_woken)\n                : xQueueSend(p_twai_obj->rx_queue, &item, 0);\n            if (queued == pdTRUE) {\n                if (item.mux1Sequence)\n                    s_p4_rx_boundary[p_twai_obj->controller_id].latestQueuedMux1 = item.mux1Sequence;\n"
+  },
+  {
+    "offset": 5397,
+    "before": "",
+    "after": "            (void)p4_twai_boundary_advance(p_twai_obj, 0xff);\n"
+  },
+  {
+    "offset": 5845,
+    "before": "            if (xQueueSendFromISR(p_twai_obj->rx_queue, &frame, task_woken) == pdTRUE) {\n",
+    "after": "            p4_twai_capture_rx(p_twai_obj, &frame);\n            p4_twai_rx_item_t item = { .frame = frame,\n                .boundary = p4_twai_boundary_observe(p_twai_obj, &frame) };\n            if (item.boundary && s_p4_rx_boundary[p_twai_obj->controller_id].mux == 1) {\n                item.mux1Sequence = item.boundary;\n                item.observedUs = (uint64_t)esp_timer_get_time();\n            }\n            const BaseType_t queued = from_isr\n                ? xQueueSendFromISR(p_twai_obj->rx_queue, &item, task_woken)\n                : xQueueSend(p_twai_obj->rx_queue, &item, 0);\n            if (queued == pdTRUE) {\n                if (item.mux1Sequence)\n                    s_p4_rx_boundary[p_twai_obj->controller_id].latestQueuedMux1 = item.mux1Sequence;\n"
+  },
+  {
+    "offset": 6389,
+    "before": "",
+    "after": "        (void)p4_twai_boundary_advance(p_twai_obj, 0xff);\n"
+  },
+  {
+    "offset": 6604,
+    "before": "",
+    "after": "static inline void twai_handle_rx_buffer_frames(twai_obj_t *obj, BaseType_t *task_woken, int *alert_req)\n{\n    p4_twai_rx_drain(obj, task_woken, alert_req, true);\n}\n\n// Load the next slot only. Callers must have retired any actual TX completion\n// once; RX/task kicks never decrement an active frame or preempt hardware.\nstatic void p4_twai_dispatch_idle(twai_obj_t *p_twai_obj, BaseType_t *task_woken,\n                                  int *alert_req, bool from_isr)\n{\n    if (p_twai_obj->state != TWAI_STATE_RUNNING ||\n        twai_hal_check_state_flags(p_twai_obj->hal,\n            TWAI_HAL_STATE_FLAG_BUS_OFF | TWAI_HAL_STATE_FLAG_TX_BUFF_OCCUPIED)) return;\n    // Priority owns the next hardware slot; an already active frame is never\n    // aborted. Invalid entries are retired before consulting the ordinary FIFO.\n    const bool service_immediate_rx = s_p4_priority[p_twai_obj->controller_id].pending &&\n        s_p4_priority[p_twai_obj->controller_id].guard.source == P4_TWAI_TX_SOURCE_R79_IMMEDIATE &&\n        s_p4_priority[p_twai_obj->controller_id].guard.rx_sequence != 0;\n    const bool priority_pending = p4_twai_priority_pending(p_twai_obj);\n    if (!twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_BUS_OFF)\n            && p_twai_obj->state == TWAI_STATE_RUNNING) {\n        if (priority_pending) {\n            p4_twai_priority_slot_t *slot = &s_p4_priority[p_twai_obj->controller_id];\n            // Frames arriving during drain/guard work are still unclassified.\n            // Retain the request and FIFO until RX or the task-side kick retries.\n            if (slot->guard.source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n                twai_hal_get_rx_msg_count(p_twai_obj->hal) != 0) return;\n            twai_hal_frame_t frame = slot->frame;\n            const uint8_t source = p4_twai_r79_source(&slot->guard);\n            const P4TwaiTxIdentity request = slot->request;\n            p4_twai_priority_clear(p_twai_obj, P4_TWAI_TX_REASON_NONE);\n            p4_twai_load(p_twai_obj, &frame, source, &request);\n            p_twai_obj->tx_msg_count++;\n            goto rx_progress;\n        }\n        if (p_twai_obj->tx_msg_count > 0 && p_twai_obj->tx_queue != NULL) {\n            twai_hal_frame_t frame;\n            int res = from_isr\n                ? xQueueReceiveFromISR(p_twai_obj->tx_queue, &frame, task_woken)\n                : xQueueReceive(p_twai_obj->tx_queue, &frame, 0);\n            assert(res == pdTRUE);\n            (void)res;\n            p4_twai_load(p_twai_obj, &frame, P4_TWAI_TX_SOURCE_UNKNOWN, NULL);\n            goto rx_progress;\n        }\n    }\n    twai_alert_handler(p_twai_obj, TWAI_ALERT_TX_IDLE, alert_req);\nrx_progress:\n    // The origin tag is metadata, not an IMMEDIATE validity fence. Preserve\n    // bounded RX service and wakeups after loading (or retiring) the request.\n    if (service_immediate_rx)\n        p4_twai_rx_drain(p_twai_obj, task_woken, alert_req, from_isr);\n}\n\n// Inspect hardware RX too: software queue state is not a MUX boundary fence.\n// Work is bounded to the HAL count snapshot, never an unbounded drain-to-empty.\nbool p4_twai_r79_periodic_ready_v2(twai_handle_t handle)\n{\n    if (!handle) return false;\n    int alert_req = 0;\n    portENTER_CRITICAL(&handle->spinlock);\n    bool ready = false;\n    if (handle->state == TWAI_STATE_RUNNING) {\n        p4_twai_rx_drain(handle, NULL, &alert_req, false);\n        p4_twai_dispatch_idle(handle, NULL, &alert_req, false);\n        ready = p4_twai_periodic_ready_locked(handle) &&\n                twai_hal_get_rx_msg_count(handle->hal) == 0;\n    }\n    portEXIT_CRITICAL(&handle->spinlock);\n    if (alert_req) xSemaphoreGive(handle->alert_semphr);\n    return ready;\n}\n\nbool p4_twai_rx_metadata_v2(twai_handle_t handle, p4_twai_rx_metadata_t *out)\n{\n    if (!handle || !out) return false;\n    portENTER_CRITICAL(&handle->spinlock);\n    *out = s_p4_rx_boundary[handle->controller_id].deliveredMeta;\n    portEXIT_CRITICAL(&handle->spinlock);\n    return out->sequence != 0;\n}\n\nbool p4_twai_r79_input_current_v2(twai_handle_t handle, uint32_t sequence)\n{\n    if (!handle || !sequence) return true;\n    int alert_req = 0;\n    portENTER_CRITICAL(&handle->spinlock);\n    if (handle->state == TWAI_STATE_RUNNING)\n        p4_twai_rx_drain(handle, NULL, &alert_req, false);\n    const uint32_t latest = s_p4_rx_boundary[handle->controller_id].latestQueuedMux1;\n    const bool current = latest == 0 || latest == sequence;\n    portEXIT_CRITICAL(&handle->spinlock);\n    if (alert_req) xSemaphoreGive(handle->alert_semphr);\n    return current;\n}\n\nvoid p4_twai_r79_input_done_v2(twai_handle_t handle, uint32_t sequence)\n{\n    if (!handle || !sequence) return;\n    int alert_req = 0;\n    portENTER_CRITICAL(&handle->spinlock);\n    p4_twai_rx_boundary_t *rx = &s_p4_rx_boundary[handle->controller_id];\n    if (rx->latestQueuedMux1 == sequence) rx->completedMux1 = sequence;\n    p4_twai_dispatch_idle(handle, NULL, &alert_req, false);\n    portEXIT_CRITICAL(&handle->spinlock);\n    if (alert_req) xSemaphoreGive(handle->alert_semphr);\n}\n\n"
+  },
+  {
+    "offset": 6734,
+    "before": "",
+    "after": "    p4TwaiDiagTxRetire(p_twai_obj->controller_id,\n        tx_success ? P4_TWAI_TX_REASON_SUCCESS : P4_TWAI_TX_REASON_FAILED);\n"
+  },
+  {
+    "offset": 7130,
+    "before": "    //If not bus-off, check if there are more frames to transmit\n    if (!twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_BUS_OFF)\n            && p_twai_obj->tx_msg_count > 0\n            && p_twai_obj->tx_queue != NULL) {\n        twai_hal_frame_t frame;\n        int res = xQueueReceiveFromISR(p_twai_obj->tx_queue, &frame, task_woken);\n        if (res == pdTRUE) {\n            twai_hal_set_tx_buffer_and_transmit(p_twai_obj->hal, &frame, 0);\n        } else {\n            assert(false && \"failed to get a frame from TX queue\");\n        }\n    } else {\n        //No more frames to transmit\n        twai_alert_handler(p_twai_obj, TWAI_ALERT_TX_IDLE, alert_req);\n    }\n",
+    "after": "    if (s_p4_priority[p_twai_obj->controller_id].pending &&\n        s_p4_priority[p_twai_obj->controller_id].guard.source == P4_TWAI_TX_SOURCE_R79_PERIODIC)\n        p4_twai_rx_drain(p_twai_obj, task_woken, alert_req, true);\n    p4_twai_dispatch_idle(p_twai_obj, task_woken, alert_req, true);\n"
+  },
+  {
+    "offset": 8299,
+    "before": "",
+    "after": "        p4_twai_boundary_reset(p_twai_obj);\n"
+  },
+  {
+    "offset": 9052,
+    "before": "",
+    "after": "    } else if (events & TWAI_HAL_EVENT_RX_BUFF_FRAME) {\n        // A previous periodic dispatch may be waiting for RX classification.\n        // Even if it is now invalid, resume any preserved ordinary FIFO.\n        p4_twai_dispatch_idle(p_twai_obj, &task_woken, &alert_req, true);\n"
+  },
+  {
+    "offset": 9269,
+    "before": "",
+    "after": "        p4_twai_priority_clear(p_twai_obj, P4_TWAI_TX_REASON_BUS_OFF);\n        p4TwaiDiagTxRetire(p_twai_obj->controller_id, P4_TWAI_TX_REASON_BUS_OFF);\n"
+  },
+  {
+    "offset": 15590,
+    "before": "    p_obj->rx_queue = xQueueCreateWithCaps(g_config->rx_queue_len, sizeof(twai_hal_frame_t), TWAI_MALLOC_CAPS);\n",
+    "after": "    p_obj->rx_queue = xQueueCreateWithCaps(g_config->rx_queue_len, sizeof(p4_twai_rx_item_t), TWAI_MALLOC_CAPS);\n"
+  },
+  {
+    "offset": 23821,
+    "before": "",
+    "after": "    portENTER_CRITICAL(&p_twai_obj->spinlock);\n    p4_twai_priority_clear(p_twai_obj, P4_TWAI_TX_REASON_UNINSTALL);\n    p4TwaiDiagTxRetire(p_twai_obj->controller_id, P4_TWAI_TX_REASON_UNINSTALL);\n    portEXIT_CRITICAL(&p_twai_obj->spinlock);\n\n"
+  },
+  {
+    "offset": 24994,
+    "before": "",
+    "after": "    p4_twai_boundary_reset(p_twai_obj);\n"
+  },
+  {
+    "offset": 25117,
+    "before": "",
+    "after": "    p4_twai_priority_clear(p_twai_obj, P4_TWAI_TX_REASON_START);\n    p4TwaiDiagTxRetire(p_twai_obj->controller_id, P4_TWAI_TX_REASON_START);\n"
+  },
+  {
+    "offset": 25969,
+    "before": "",
+    "after": "    p4_twai_priority_clear(p_twai_obj, P4_TWAI_TX_REASON_STOP);\n    p4TwaiDiagTxRetire(p_twai_obj->controller_id, P4_TWAI_TX_REASON_STOP);\n"
+  },
+  {
+    "offset": 26384,
+    "before": "    //Check arguments\n",
+    "after": ""
+  },
+  {
+    "offset": 26626,
+    "before": "\n",
+    "after": ""
+  },
+  {
+    "offset": 26664,
+    "before": "    portENTER_CRITICAL(&handle->spinlock);\n    //Check State\n    if (p_twai_obj->mode == TWAI_MODE_LISTEN_ONLY) {\n        portEXIT_CRITICAL(&handle->spinlock);\n        return ESP_ERR_NOT_SUPPORTED;\n    }\n    if (p_twai_obj->state != TWAI_STATE_RUNNING) {\n        portEXIT_CRITICAL(&handle->spinlock);\n        return ESP_ERR_INVALID_STATE;\n    }\n    //Format frame\n    esp_err_t ret = ESP_FAIL;\n",
+    "after": ""
+  },
+  {
+    "offset": 27619,
+    "before": "    //Check if frame can be sent immediately\n    if (p_twai_obj->tx_msg_count == 0) {\n        //No other frames waiting to transmit. Bypass queue and transmit immediately\n        twai_hal_set_tx_buffer_and_transmit(p_twai_obj->hal, &tx_frame, 0);\n",
+    "after": "    const TickType_t started = xTaskGetTickCount();\n    for (;;) {\n        portENTER_CRITICAL(&handle->spinlock);\n        esp_err_t ret;\n        if (p_twai_obj->mode == TWAI_MODE_LISTEN_ONLY) {\n            ret = ESP_ERR_NOT_SUPPORTED;\n        } else if (p_twai_obj->state != TWAI_STATE_RUNNING ||\n                   twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_BUS_OFF)) {\n            ret = ESP_ERR_INVALID_STATE;\n        } else if (p4_twai_priority_pending(p_twai_obj)) {\n            // Ordinary producers cannot extend the backlog ahead of R79.\n            ret = ESP_ERR_TIMEOUT;\n        } else if (p_twai_obj->tx_msg_count == 0) {\n            p4_twai_load(p_twai_obj, &tx_frame, P4_TWAI_TX_SOURCE_UNKNOWN, NULL);\n            p_twai_obj->tx_msg_count++;\n            ret = ESP_OK;\n        } else if (p_twai_obj->tx_queue == NULL) {\n            ret = ESP_FAIL;\n        } else if (xQueueSend(p_twai_obj->tx_queue, &tx_frame, 0) == pdTRUE) {\n            // Queue publication and accounting are atomic with respect to both\n            // ISR dispatch and priority admission (no post-enqueue handoff gap).\n            p_twai_obj->tx_msg_count++;\n            ret = ESP_OK;\n        } else {\n            portEXIT_CRITICAL(&handle->spinlock);\n            if ((TickType_t)(xTaskGetTickCount() - started) >= ticks_to_wait) {\n                return ESP_ERR_TIMEOUT;\n            }\n            // Never wait on a queue or sleep while holding the native spinlock.\n            vTaskDelay(1);\n            continue;\n        }\n        portEXIT_CRITICAL(&handle->spinlock);\n        return ret;\n    }\n}\n\n// State-derived ordinary MUX1 clones must never outlive their authorization in\n// the FIFO and follow a newer R79. This explicit route is atomic with native\n// R79 admission; generic ordinary traffic keeps the existing queue behavior.\nesp_err_t p4_twai_transmit_mux1_now_v2(twai_handle_t handle, const twai_message_t *message)\n{\n    TWAI_CHECK(handle != NULL && message != NULL, ESP_ERR_INVALID_ARG);\n    TWAI_CHECK(message->identifier == 0x3FD && !message->extd && !message->rtr &&\n               message->data_length_code == 8 && (message->data[0] & 0x07) == 1, ESP_ERR_INVALID_ARG);\n    twai_obj_t *p_twai_obj = handle;\n    twai_hal_frame_t tx_frame;\n    twai_frame_header_t header = {\n        .id = message->identifier,\n        .dlc = message->data_length_code,\n        .ide = message->extd,\n        .rtr = message->rtr,\n    };\n    twai_hal_trans_desc_t hal_trans = {\n        .frame = {\n            .header = &header,\n            .buffer = (uint8_t *)message->data,\n            .buffer_len = message->data_length_code,\n        },\n        .config.retry_cnt = message->ss ? 0 : -1,\n        .config.loopback = message->self,\n    };\n    twai_hal_format_frame(&hal_trans, &tx_frame);\n\n    portENTER_CRITICAL(&handle->spinlock);\n    esp_err_t ret;\n    if (p_twai_obj->mode == TWAI_MODE_LISTEN_ONLY) {\n        ret = ESP_ERR_NOT_SUPPORTED;\n    } else if (p_twai_obj->state != TWAI_STATE_RUNNING ||\n               twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_BUS_OFF)) {\n        ret = ESP_ERR_INVALID_STATE;\n    } else if (p4_twai_priority_pending(p_twai_obj) || p_twai_obj->tx_msg_count != 0 ||\n               twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_TX_BUFF_OCCUPIED)) {\n        // Do not wait or consume the request: the producer must recompose from\n        // the next fresh stock frame, not retry an old payload after R79.\n        ret = ESP_ERR_TIMEOUT;\n    } else {\n        p4_twai_load(p_twai_obj, &tx_frame, P4_TWAI_TX_SOURCE_UNKNOWN, NULL);\n"
+  },
+  {
+    "offset": 27972,
+    "before": "",
+    "after": "    return ret;\n}\n"
+  },
+  {
+    "offset": 27973,
+    "before": "    if (ret != ESP_OK) {\n        if (p_twai_obj->tx_queue == NULL) {\n            //TX Queue is disabled and TX buffer is occupied, message was not sent\n            ret = ESP_FAIL;\n        } else if (xQueueSend(p_twai_obj->tx_queue, &tx_frame, ticks_to_wait) == pdTRUE) {\n            //Copied to TX Queue\n            portENTER_CRITICAL(&handle->spinlock);\n            if ((!twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_TX_BUFF_OCCUPIED)) && uxQueueMessagesWaiting(p_twai_obj->tx_queue) > 0) {\n                //If the TX buffer is free but the TX queue is not empty. Check if we need to manually start a transmission\n                if (twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_BUS_OFF) || !twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_RUNNING)) {\n                    //TX buffer became free due to bus-off or is no longer running. No need to start a transmission\n                    ret = ESP_ERR_INVALID_STATE;\n                } else {\n                    //Manually start a transmission\n                    int res = xQueueReceive(p_twai_obj->tx_queue, &tx_frame, 0);\n                    assert(res == pdTRUE);\n                    (void)res;\n                    twai_hal_set_tx_buffer_and_transmit(p_twai_obj->hal, &tx_frame, 0);\n                    p_twai_obj->tx_msg_count++;\n                    ret = ESP_OK;\n                }\n            } else {\n                //Frame was copied to queue, waiting to be transmitted\n                p_twai_obj->tx_msg_count++;\n                ret = ESP_OK;\n            }\n            portEXIT_CRITICAL(&handle->spinlock);\n",
+    "after": "esp_err_t p4_twai_transmit_r79_v2(twai_handle_t handle, const twai_message_t *message,\n                               const p4_twai_priority_guard_t *guard)\n{\n    TWAI_CHECK(handle != NULL && message != NULL && guard != NULL, ESP_ERR_INVALID_ARG);\n    TWAI_CHECK(guard->generation != NULL && guard->administrative_hold != NULL, ESP_ERR_INVALID_ARG);\n    TWAI_CHECK(message->identifier == 0x3FD && !message->extd && !message->rtr &&\n               message->data_length_code == 8 && (message->data[0] & 0x07) == 1, ESP_ERR_INVALID_ARG);\n    twai_obj_t *p_twai_obj = handle;\n    twai_hal_frame_t tx_frame;\n    twai_frame_header_t header = {\n        .id = message->identifier,\n        .dlc = message->data_length_code,\n        .ide = message->extd,\n        .rtr = message->rtr,\n    };\n    twai_hal_trans_desc_t hal_trans = {\n        .frame = {\n            .header = &header,\n            .buffer = (uint8_t *)message->data,\n            .buffer_len = message->data_length_code,\n        },\n        .config.retry_cnt = message->ss ? 0 : -1,\n        .config.loopback = message->self,\n    };\n    twai_hal_format_frame(&hal_trans, &tx_frame);\n\n    int alert_req = 0;\n    portENTER_CRITICAL(&handle->spinlock);\n    // An existing PERIODIC owner, including a protected one-shot, must see\n    // fresh HAL boundaries before admission decides whether it still owns TX.\n    if (p_twai_obj->state == TWAI_STATE_RUNNING &&\n        (guard->source == P4_TWAI_TX_SOURCE_R79_PERIODIC ||\n         (s_p4_priority[p_twai_obj->controller_id].pending &&\n          s_p4_priority[p_twai_obj->controller_id].guard.source == P4_TWAI_TX_SOURCE_R79_PERIODIC)))\n        p4_twai_rx_drain(p_twai_obj, NULL, &alert_req, false);\n    esp_err_t ret;\n    if (p_twai_obj->mode == TWAI_MODE_LISTEN_ONLY) {\n        ret = ESP_ERR_NOT_SUPPORTED;\n    } else if (p_twai_obj->state != TWAI_STATE_RUNNING ||\n               twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_BUS_OFF) ||\n               !p4_twai_priority_guard_valid(guard) ||\n               (guard->source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n                !p4_twai_periodic_ready_locked(p_twai_obj))) {\n        ret = ESP_ERR_INVALID_STATE;\n    } else if (guard->source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n               twai_hal_get_rx_msg_count(p_twai_obj->hal) != 0) {\n        ret = ESP_ERR_TIMEOUT; // Unclassified residual RX, not an obsolete cycle.\n    } else if (p4_twai_priority_pending(p_twai_obj)) {\n        p4_twai_priority_slot_t *slot = &s_p4_priority[p_twai_obj->controller_id];\n        if (!p4_twai_priority_guard_valid(guard)) {\n            ret = ESP_ERR_INVALID_STATE;\n        } else if (!slot->guard.preserve_pending &&\n                   guard->source == P4_TWAI_TX_SOURCE_R79_IMMEDIATE &&\n                   (slot->guard.source == P4_TWAI_TX_SOURCE_R79_IMMEDIATE ||\n                    slot->guard.source == P4_TWAI_TX_SOURCE_R79_PERIODIC)) {\n            // Replace exactly one pending request under the native lock. The\n            // active controller, ordinary FIFO and message count are untouched.\n            p4TwaiDiagTxCancelled(p_twai_obj->controller_id, &slot->request, P4_TWAI_TX_REASON_REPLACED);\n            slot->frame = tx_frame;\n            slot->guard = *guard;\n            slot->request = p4_twai_new_request(p_twai_obj, &tx_frame, guard);\n            ret = ESP_OK;\n"
+  },
+  {
+    "offset": 29613,
+    "before": "            //Timed out waiting for free space on TX queue\n",
+    "after": ""
+  },
+  {
+    "offset": 29717,
+    "before": "",
+    "after": "    } else if (!twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_TX_BUFF_OCCUPIED)) {\n        const P4TwaiTxIdentity request = p4_twai_new_request(p_twai_obj, &tx_frame, guard);\n        // Request diagnostics may take time. Recheck live guards and RX at\n        // the last software boundary before handing the frame to hardware.\n        if (guard->source == P4_TWAI_TX_SOURCE_R79_PERIODIC)\n            p4_twai_rx_drain(p_twai_obj, NULL, &alert_req, false);\n        const uint8_t reason = p4_twai_priority_guard_reason(guard);\n        if (reason != P4_TWAI_TX_REASON_NONE ||\n            (guard->source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n             !p4_twai_periodic_ready_locked(p_twai_obj))) {\n            p4TwaiDiagTxCancelled(p_twai_obj->controller_id, &request,\n                reason != P4_TWAI_TX_REASON_NONE ? reason : P4_TWAI_TX_REASON_RX_BOUNDARY);\n            ret = ESP_ERR_INVALID_STATE;\n        } else if (guard->source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n                   twai_hal_get_rx_msg_count(p_twai_obj->hal) != 0) {\n            p4TwaiDiagTxCancelled(p_twai_obj->controller_id, &request, P4_TWAI_TX_REASON_RX_PENDING);\n            ret = ESP_ERR_TIMEOUT;\n        } else {\n            p4_twai_load(p_twai_obj, &tx_frame, p4_twai_r79_source(guard), &request);\n            p_twai_obj->tx_msg_count++;\n            ret = ESP_OK;\n        }\n    } else {\n        p4_twai_priority_slot_t *slot = &s_p4_priority[p_twai_obj->controller_id];\n        slot->frame = tx_frame;\n        slot->guard = *guard;\n        slot->rxBoundary = s_p4_rx_boundary[p_twai_obj->controller_id].delivered;\n        slot->pending = true;\n        slot->request = p4_twai_new_request(p_twai_obj, &tx_frame, guard);\n        p_twai_obj->tx_msg_count++;\n        ret = ESP_OK;\n"
+  },
+  {
+    "offset": 29723,
+    "before": "",
+    "after": "    // Task-side progress also covers a drained RX interrupt with an idle slot.\n    p4_twai_dispatch_idle(p_twai_obj, NULL, &alert_req, false);\n    // Keep tagged RX progress on successful or rejected admission, without\n    // putting unrelated parse/capture/queue work ahead of an IMMEDIATE load.\n    if (p_twai_obj->state == TWAI_STATE_RUNNING &&\n        guard->source != P4_TWAI_TX_SOURCE_R79_PERIODIC && guard->rx_sequence != 0)\n        p4_twai_rx_drain(p_twai_obj, NULL, &alert_req, false);\n    portEXIT_CRITICAL(&handle->spinlock);\n    if (alert_req) xSemaphoreGive(handle->alert_semphr);\n"
+  },
+  {
+    "offset": 30310,
+    "before": "    twai_hal_frame_t rx_frame;\n    if (xQueueReceive(p_twai_obj->rx_queue, &rx_frame, ticks_to_wait) != pdTRUE) {\n",
+    "after": "    p4_twai_rx_item_t item = {0};\n    if (xQueueReceive(p_twai_obj->rx_queue, &item, ticks_to_wait) != pdTRUE) {\n"
+  },
+  {
+    "offset": 30538,
+    "before": "",
+    "after": "    s_p4_rx_boundary[p_twai_obj->controller_id].deliveredMeta = (p4_twai_rx_metadata_t){\n        .observed_us = item.observedUs,\n        .dequeued_us = item.mux1Sequence ? (uint64_t)esp_timer_get_time() : 0,\n        .sequence = item.mux1Sequence };\n    if (item.boundary)\n        s_p4_rx_boundary[p_twai_obj->controller_id].delivered = item.boundary;\n"
+  },
+  {
+    "offset": 30638,
+    "before": "    twai_hal_parse_frame(p_twai_obj->hal, &rx_frame, &header, message->data, TWAI_FRAME_MAX_LEN);\n",
+    "after": "    twai_hal_parse_frame(p_twai_obj->hal, &item.frame, &header, message->data, TWAI_FRAME_MAX_LEN);\n"
+  },
+  {
+    "offset": 30880,
+    "before": "",
+    "after": "    // Reject malformed raw DLC before the remaining-byte count can underflow.\n    TWAI_CHECK(message->data_length_code <= TWAI_FRAME_MAX_LEN, ESP_ERR_INVALID_SIZE);\n"
+  },
+  {
+    "offset": 33521,
+    "before": "",
+    "after": "    p4_twai_priority_clear(p_twai_obj, P4_TWAI_TX_REASON_RECOVERY);\n    p4TwaiDiagTxRetire(p_twai_obj->controller_id, P4_TWAI_TX_REASON_RECOVERY);\n"
+  },
+  {
+    "offset": 35579,
+    "before": "    TWAI_CHECK(handle->tx_queue != NULL, ESP_ERR_NOT_SUPPORTED);\n",
+    "after": ""
+  },
+  {
+    "offset": 35725,
+    "before": "",
+    "after": "    p4_twai_priority_clear(p_twai_obj, P4_TWAI_TX_REASON_QUEUE_CLEAR);\n"
+  },
+  {
+    "offset": 35957,
+    "before": "    xQueueReset(p_twai_obj->tx_queue);\n",
+    "after": "    if (p_twai_obj->tx_queue != NULL) {\n        xQueueReset(p_twai_obj->tx_queue);\n    }\n"
+  },
+  {
+    "offset": 36549,
+    "before": "",
+    "after": "    p4_twai_boundary_reset(p_twai_obj);\n"
+  }
+]

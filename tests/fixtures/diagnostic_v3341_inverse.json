@@ -1,0 +1,64 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.34.0",
+  "files": {
+    "p4_can.h": {
+      "baseSha256": "147d2afae32c57120e5f5cccd6e505fe4f088402fb77740cd8eafda35f903828",
+      "hunks": [
+        {
+          "before": "  if (!f || f->data_length_code > 8 || f->identifier > (f->extd ? 0x1fffffffUL : 0x7ffUL)) {\n    return ESP_ERR_INVALID_ARG;\n  }\n  if (!p4CanAllRunning()) {\n    P4_R79_TIMING_GATE_REASON(bus, f, wait, ESP_ERR_INVALID_STATE, p4_r79_timing::ALL_CONTROLLERS_NOT_READY);\n    P4_CAN_DIAG_TX(bus, f, ESP_ERR_INVALID_STATE, false, source);\n    return ESP_ERR_INVALID_STATE;\n",
+          "after": "  if (!f || f->data_length_code > 8 || f->identifier > (f->extd ? 0x1fffffffUL : 0x7ffUL)) {\n    return ESP_ERR_INVALID_ARG;\n  }\n  // YL R79 depends on VEHICLE transport and PARTY state, not additional BODY.\n  // Only the explicit guarded priority route gets this exception. Ordinary\n  // features retain their existing all-controller admission requirements.\n  const bool ready = priority && activeProfileIsYl()\n      ? p4CanOnline[p4CanBusA()] && p4CanOnline[bus] && p4CanHandles[bus]\n      : p4CanAllRunning();\n  if (!ready) {\n    P4_R79_TIMING_GATE_REASON(bus, f, wait, ESP_ERR_INVALID_STATE, p4_r79_timing::ALL_CONTROLLERS_NOT_READY);\n    P4_CAN_DIAG_TX(bus, f, ESP_ERR_INVALID_STATE, false, source);\n    return ESP_ERR_INVALID_STATE;\n"
+        }
+      ]
+    },
+    "@sketch": {
+      "baseSha256": "0a827fe1c690288f1a9f8d8dd32d2c51e64125abbc7fbc913d1a68c402206644",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.34.0 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.34.1 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.0\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.1\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        },
+        {
+          "before": "  }\n  nativeAReady = p4CanOnline[p4CanBusA()];\n  twaiReady = p4CanOnline[p4CanBusB()];\n  if (!allCanReady) restartP4CanSafely();\n  canTwaiResetErrorAlertWindow();\n  canInitTime = millis();\n  bootCaptureMarkOnce(&bootCapCanInitDoneMs);\n",
+          "after": "  }\n  nativeAReady = p4CanOnline[p4CanBusA()];\n  twaiReady = p4CanOnline[p4CanBusB()];\n  // YL additional BODY is optional for VEHICLE R79; keep its failure visible\n  // while allowing the required VEHICLE/PARTY pair to start normally.\n  if (!allCanReady && !(activeProfileIsYl() && nativeAReady && twaiReady))\n    restartP4CanSafely();\n  canTwaiResetErrorAlertWindow();\n  canInitTime = millis();\n  bootCaptureMarkOnce(&bootCapCanInitDoneMs);\n"
+        }
+      ]
+    },
+    "can_runtime.h": {
+      "baseSha256": "b74b9f912f7c2adb427e4f4fac3479ed41f3cba50263fb13b5fb7fecd673d4cd",
+      "hunks": [
+        {
+          "before": "\nstatic void p4CanServiceNativeStatus(uint8_t bus, bool routeA) {\n  const twai_handle_t handle = p4CanHandles[bus];\n  if (!handle) return;\n  uint32_t alerts = 0;\n  twai_read_alerts_v2(handle, &alerts, 0);\n",
+          "after": "\nstatic void p4CanServiceNativeStatus(uint8_t bus, bool routeA) {\n  const twai_handle_t handle = p4CanHandles[bus];\n  const bool isolatedBody = activeProfileIsYl() && !routeA && bus == p4CanBusExtra();\n  if (!handle) return;\n  uint32_t alerts = 0;\n  twai_read_alerts_v2(handle, &alerts, 0);\n"
+        },
+        {
+          "before": "  twai_status_info_t st = {};\n  if (twai_get_status_info_v2(handle, &st) != ESP_OK) {\n    p4CanOnline[bus] = false;\n    if (routeA) nativeAReady = false;\n    return;\n  }\n  p4CanPublishStatus(bus, st);\n  if (routeA) {\n    nativeALastControllerState = (uint8_t)st.state;\n    nativeALastControllerStateMs = millis();\n",
+          "after": "  twai_status_info_t st = {};\n  if (twai_get_status_info_v2(handle, &st) != ESP_OK) {\n    p4CanOnline[bus] = false;\n    if (isolatedBody) p4CanExtraFresh = false;\n    if (routeA) nativeAReady = false;\n    return;\n  }\n  p4CanPublishStatus(bus, st);\n  if (isolatedBody && st.state != TWAI_STATE_RUNNING) p4CanExtraFresh = false;\n  if (routeA) {\n    nativeALastControllerState = (uint8_t)st.state;\n    nativeALastControllerStateMs = millis();\n"
+        },
+        {
+          "before": "        invalidateCanTxStateForCanARecovery();\n      } else {\n        p4CanExtraFresh = false;\n        invalidateCanTxStateForFullRecovery();\n      }\n    }\n    const esp_err_t diagRecoveryResult = twai_initiate_recovery_v2(handle);\n",
+          "after": "        invalidateCanTxStateForCanARecovery();\n      } else {\n        p4CanExtraFresh = false;\n        // Additional YL BODY owns no R79 template, gear or AP observation.\n        // Its recovery must not revoke the healthy VEHICLE/PARTY session.\n        if (!isolatedBody) invalidateCanTxStateForFullRecovery();\n      }\n    }\n    const esp_err_t diagRecoveryResult = twai_initiate_recovery_v2(handle);\n"
+        },
+        {
+          "before": "      p4CanRecoveries[bus]++;\n    } else {\n      p4CanRecoveryFailures[bus]++;\n      requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);\n    }\n  } else if (st.state == TWAI_STATE_STOPPED && !canMaintenanceActive()) {\n    const esp_err_t diagRestartResult = twai_start_v2(handle);\n    if (diagRestartResult != ESP_OK) P4_CAN_DIAG_RECOVERY(bus, false, false);\n    if (diagRestartResult == ESP_OK) p4CanOnline[bus] = true;\n    else requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);\n  } else p4CanOnline[bus] = st.state == TWAI_STATE_RUNNING;\n  if (routeA) {\n    nativeAReady = p4CanOnline[bus];\n",
+          "after": "      p4CanRecoveries[bus]++;\n    } else {\n      p4CanRecoveryFailures[bus]++;\n      // Keep this controller installed and retry on the next 100ms status\n      // tick; never tear down live readers or the healthy required pair.\n      if (!isolatedBody) requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);\n    }\n  } else if (st.state == TWAI_STATE_STOPPED && !canMaintenanceActive()) {\n    if (isolatedBody) p4CanOnline[bus] = false;\n    const esp_err_t diagRestartResult = twai_start_v2(handle);\n    if (diagRestartResult != ESP_OK) P4_CAN_DIAG_RECOVERY(bus, false, false);\n    if (diagRestartResult == ESP_OK) p4CanOnline[bus] = true;\n    else if (!isolatedBody) requestCanSubsystemRestart(CAN_SUP_HARD_STALE, CAN_REC_NATIVE_A_REINIT_FAIL);\n  } else p4CanOnline[bus] = st.state == TWAI_STATE_RUNNING;\n  if (routeA) {\n    nativeAReady = p4CanOnline[bus];\n"
+        },
+        {
+          "before": "  p4CanExtraFresh = false;\n  const bool a = nativeAInitChecked();\n  const bool c = p4CanReinstall(p4CanBusExtra(), canUsbPassive());\n  return a && c;\n}\n\nstatic bool recoveryTwaiInstallFresh() {\n",
+          "after": "  p4CanExtraFresh = false;\n  const bool a = nativeAInitChecked();\n  const bool c = p4CanReinstall(p4CanBusExtra(), canUsbPassive());\n  // An absent additional BODY must not turn recovery of the healthy YL\n  // required pair into a reboot loop. Its failed state remains visible.\n  return a && (activeProfileIsYl() || c);\n}\n\nstatic bool recoveryTwaiInstallFresh() {\n"
+        },
+        {
+          "before": "      bool aFresh = recoveryFresh(now, lastCanAFrameMs, RECOVERY_BUS_FRESH_MS);\n      bool bFresh = recoveryFresh(now, lastCanBFrameMs, RECOVERY_BUS_FRESH_MS);\n      bool extraFresh = recoveryFresh(now, p4CanLastRxMs[p4CanBusExtra()], RECOVERY_BUS_FRESH_MS);\n      bool bothFresh = aFresh && bFresh && extraFresh;\n      bool anyFresh = aFresh || bFresh || extraFresh;\n\n      if (canUsbPassive()) {\n        // A single connected bus or sleeping vehicle is normal in survey mode.\n",
+          "after": "      bool aFresh = recoveryFresh(now, lastCanAFrameMs, RECOVERY_BUS_FRESH_MS);\n      bool bFresh = recoveryFresh(now, lastCanBFrameMs, RECOVERY_BUS_FRESH_MS);\n      bool extraFresh = recoveryFresh(now, p4CanLastRxMs[p4CanBusExtra()], RECOVERY_BUS_FRESH_MS);\n      bool bothFresh = aFresh && bFresh && (activeProfileIsYl() || extraFresh);\n      bool anyFresh = aFresh || bFresh || (!activeProfileIsYl() && extraFresh);\n\n      if (canUsbPassive()) {\n        // A single connected bus or sleeping vehicle is normal in survey mode.\n"
+        },
+        {
+          "before": "        recoveryWakeAcquireStartMs = 0;\n      } else if (bothFresh) {\n        if (!recoveryEverBothActive || recoverySleeping || recoveryWakeAcquireStartMs != 0) {\n          P4CAN_SERIAL_PRINTLN(\"[CAN SUP] BODY+CHASSIS+PARTY active\");\n        }\n        recoveryEverBothActive = true;\n        recoverySleeping = false;\n",
+          "after": "        recoveryWakeAcquireStartMs = 0;\n      } else if (bothFresh) {\n        if (!recoveryEverBothActive || recoverySleeping || recoveryWakeAcquireStartMs != 0) {\n          P4CAN_SERIAL_PRINTLN(\"[CAN SUP] required CAN buses active\");\n        }\n        recoveryEverBothActive = true;\n        recoverySleeping = false;\n"
+        }
+      ]
+    }
+  }
+}

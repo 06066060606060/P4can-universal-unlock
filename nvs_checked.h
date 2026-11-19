@@ -1,4 +1,5 @@
 #pragma once
+#include "can_error_diag_macros.h"
 
 #include <nvs.h>
 #include <stddef.h>
@@ -110,8 +111,8 @@ static inline bool nvsCheckedWriteBlob(const char *name, const char *key,
                                        const void *value, size_t size) {
   nvs_handle_t handle;
   if (nvs_open(name, NVS_READWRITE, &handle) != ESP_OK) return false;
-  const bool ok = nvs_set_blob(handle, key, value, size) == ESP_OK &&
-      nvs_commit(handle) == ESP_OK;
+  const bool ok = P4_CAN_DIAG_NVS_WRITE(8, nvs_set_blob(handle, key, value, size)) == ESP_OK &&
+      P4_CAN_DIAG_NVS_WRITE(8, nvs_commit(handle)) == ESP_OK;
   nvs_close(handle);
   return ok;
 }

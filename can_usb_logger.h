@@ -1,4 +1,5 @@
 #pragma once
+#include "can_error_diag_macros.h"
 #include "can_usb_logger_pure.h"
 #include <esp_timer.h>
 
@@ -24,7 +25,7 @@ static bool canUsbTxHeld() {
 static bool canUsbSaveMode(bool passive) {
   Preferences prefs;
   if (!prefs.begin("usblog", false)) return false;
-  const bool ok = prefs.putBool("passive", passive) == 1 &&
+  const bool ok = P4_CAN_DIAG_NVS_WRITE(6, prefs.putBool("passive", passive)) == 1 &&
                   prefs.getBool("passive", !passive) == passive;
   prefs.end();
   return ok;

@@ -1,4 +1,4 @@
-// P4-CAN Universal v3.29.3 - Model 3/Y / Model YL firmware
+// P4-CAN Universal v3.35.0 - Model 3/Y / Model YL firmware
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -38,8 +38,19 @@
 #include "index_html.h"
 #include "lab_fonts.h"
 #include "dashboard_icon.h"
+#include "p4_twai_diag.h"
+#include "p4_twai_error_decode_pure.h"
+#include "can_error_hooks.h"
 #include "vehicle_profile.h"
+#include "r79_timing_capture.h"
+#define P4_R79_TIMING_GATE_REJECTED(bus, frame, wait, result) p4R79TimingGateRejected(bus, frame, wait, result)
+#define P4_R79_TIMING_GATE_REASON(bus, frame, wait, result, reason) p4R79TimingGateRejected(bus, frame, wait, result, reason, p4CanReadinessMask())
+#define P4_R79_TIMING_RX(bus, frame) p4R79TimingRx(bus, frame)
+#define P4_R79_TIMING_TX_BEGIN(bus, frame, wait) p4R79TimingTxBegin(bus, frame, wait, p4CanReadinessMask())
+#define P4_R79_TIMING_TX_END(token, frame, result, called) p4R79TimingTxEnd(token, frame, result, called)
 #include "p4_can.h"
+#include "can_gpio_runtime.h"
+#include "r79_timing_driver.h"
 #include "esp32-hal-hosted.h"
 #include "p4_network.h"
 #include "summon_state_pure.h"
@@ -59,6 +70,7 @@
 #include "nvs_keep_ble_reset_pure.h"
 #include "tsl9_input_scheduler_pure.h"
 #include "driver_window_lab_pure.h"
+#include "preheat_pure.h"
 #include "driver_monitor_capture_pure.h"
 #include "r79_fixed_policy_pure.h"
 #include "r79_dms_composition_pure.h"
@@ -67,7 +79,7 @@
 #include "text_format_arduino.h"
 #include "json_writer_arduino.h"
 
-#define FW_VERSION "v3.29.3"
+#define FW_VERSION "v3.35.2"
 
 #include "continuous_ap_fsm_pure.h"
 #include "p4can_core_state.h"
@@ -79,12 +91,17 @@
 #include "can_core.h"
 #include "can_busoff_persistence.h"
 #include "vehicle_logic.h"
+#include "automatic_shift/gear_shift_runtime.h"
 #include "continuous_ap_runtime.h"
+#include "preheat_runtime.h"
 #include "web_api.h"
 #include "can_runtime.h"
 #include "can_usb_logger_task.h"
 
 void setup() {
+  const uint32_t diagnosticBootId = esp_random();
+  p4TwaiDiagInit(diagnosticBootId);
+  canDiagInit(diagnosticBootId);
   bootTime = millis();
   Serial.begin(115200);
   delay(300);
@@ -155,7 +172,7 @@ void setup() {
       } else if (!vehicleProfileValid(storedProfile)) {
         if (!universalInitialized) {
           P4CAN_SERIAL_PRINTLN("Universal first boot: erasing previous NVS configuration...");
-          if (nvs_flash_erase() == ESP_OK && nvs_flash_init() == ESP_OK &&
+          if (P4_CAN_DIAG_NVS_WRITE(5, nvs_flash_erase()) == ESP_OK && nvs_flash_init() == ESP_OK &&
               vehicleProfileWriteBootstrapMarker(true)) {
             vehicleProfileMigrationNotice = true;
           } else {
@@ -170,6 +187,8 @@ void setup() {
       }
     }
   }
+
+  (void)p4CanGpioLoadAtBoot();
 
   canTxBarrierMutex = xSemaphoreCreateMutex();
   if (!canTxBarrierMutex) {
@@ -205,6 +224,9 @@ void setup() {
   nvsSchemaRead();
   (void)(featureConfigMigrateToSchema2() && featureConfigMigrateToSchema3());
   featureCfgLoad();
+  fsdSettingsLoad();
+  gearShiftConfigLoad();
+  serviceSettingsLoad();
   continuousApControlLoad();
   nagCfgLoad();
   summonCfgLoad();
@@ -217,6 +239,7 @@ void setup() {
   s3xyAutoLoadConfig();
   nvsSchemaFinalize();
   canBusOffPersistenceLoad();
+  preheatMenuLoad();
   if (labMenuEnabled) {
     researchCaptureInit();
     driverMonitorCaptureInit();
@@ -235,12 +258,9 @@ void setup() {
                 labMenuEnabled ? "ON" : "OFF",
                 (unsigned)lab3f8AlcMode, (unsigned)lab3f8UlcBlindMode,
                 (unsigned)lab3f8UlcOffHighwayMode, (unsigned)ulcNoConfirmTimingMode);
-  P4CAN_SERIAL_PRINTF("R79 mode=%u bit19=0 bit47=%s bit18Mode=%u mode1WaitMode=%u mode1DelayMs=%u mode2Reinject=%u mode2DelayMs=%u policy=DEFAULT_ON_MANUAL_DR_SUSPEND\n",
-                (unsigned)r79TransportMode, r79Hw3Active() ? "STOCK" : "1",
-                (unsigned)r79Bit18Policy,
-                (unsigned)r79Mode1TxWaitMode, (unsigned)r79Mode1DelayMs,
-                r79Mode2ReinjectEnabled ? 1u : 0u,
-                (unsigned)r79Mode2DelayMs);
+  P4CAN_SERIAL_PRINTF("R79 mode=1 bit19=0 bit47=%s bit18Mode=%u mode1WaitMode=%u mode1DelayMs=%u policy=DEFAULT_ON_MANUAL_DR_SUSPEND\n",
+                r79Hw3Active() ? "STOCK" : "1", (unsigned)r79Bit18Policy,
+                (unsigned)r79Mode1TxWaitMode, (unsigned)r79Mode1DelayMs);
   P4CAN_SERIAL_PRINTF("S3XY bluetooth=%s auto-connect=%s registry=%u/%u\n",
                 s3xyBluetoothEnabled ? "ON" : "OFF",
                 s3xyAutoEnabled ? "true" : "false",
@@ -248,6 +268,15 @@ void setup() {
 
   // Board power-on is treated as the wake signal for RX.
   // Existing per-feature validity gates still control every injection/TX path.
+  // GPIO faults are separate from profile setup so the ordinary Settings page
+  // remains available to repair wiring; never install CAN/start its tasks or BLE.
+  if (!p4CanGpioValid) {
+    Serial.printf("[P4-CAN] %s; WiFi/dashboard recovery only\n", p4CanGpioLastError);
+    wifiApBootStart();
+    const BaseType_t retWeb = xTaskCreatePinnedToCore(webTask, "web", 8192, nullptr, 1, &webTaskHandle, 0);
+    if (retWeb != pdPASS) restartP4CanSafely();
+    return;
+  }
   P4CAN_SERIAL_PRINTLN("Driver-wake power detected. Starting CAN init immediately...");
 
   // Match the reference's physical controller order, regardless of profile.
@@ -257,16 +286,20 @@ void setup() {
         bus == p4CanBusB() ? TWAI_TX_QUEUE_LEN : 32);
     allCanReady = ready && allCanReady;
     Serial.printf("[P4-CAN] CAN%u %s TWAI%u TX%d RX%d %s: %s\n", bus + 1,
-        p4CanNames[bus], bus, p4CanTxPins[bus], p4CanRxPins[bus],
-        canUsbPassive() ? "LISTEN_ONLY" : "NORMAL", esp_err_to_name(p4CanInitError[bus]));
+        p4CanRoleName(bus), bus, p4CanTxPins[bus], p4CanRxPins[bus],
+        p4CanPassive[bus] ? "LISTEN_ONLY" : "NORMAL", esp_err_to_name(p4CanInitError[bus]));
   }
   nativeAReady = p4CanOnline[p4CanBusA()];
   twaiReady = p4CanOnline[p4CanBusB()];
-  if (!allCanReady) restartP4CanSafely();
+  // YL additional BODY is optional for VEHICLE R79; keep its failure visible
+  // while allowing the required VEHICLE/PARTY pair to start normally.
+  if (!allCanReady && !(activeProfileIsYl() && nativeAReady && twaiReady))
+    restartP4CanSafely();
   canTwaiResetErrorAlertWindow();
   canInitTime = millis();
   bootCaptureMarkOnce(&bootCapCanInitDoneMs);
   if (!recoveryStartCanTasks()) restartP4CanSafely();
+  if(xTaskCreatePinnedToCore(gearShiftTask,"autoShift",12288,nullptr,2,nullptr,0)!=pdPASS)restartP4CanSafely();
   bootCaptureMarkOnce(&bootCapCanTasksStartedMs);
 
   BaseType_t retSup = xTaskCreatePinnedToCore(canSupervisorTask, "canSup", 6144, nullptr, 3, &canSupervisorHandle, 0);

@@ -1,0 +1,27 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.34.8",
+  "files": {
+    "@sketch": {
+      "baseSha256": "b6396651f996bfd970ea648cd5c419b251d6a284e4d2bc097f3f4837333a017e",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.34.8 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n#include <WebServer.h>\n",
+          "after": "// P4-CAN Universal v3.34.9 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n#include <WebServer.h>\n"
+        },
+        {
+          "before": "#include \"fixed_point_pure.h\"\n#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.8\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n#include \"p4can_forward.h\"\n",
+          "after": "#include \"fixed_point_pure.h\"\n#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.9\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n#include \"p4can_forward.h\"\n"
+        }
+      ]
+    },
+    "vehicle_logic.h": {
+      "baseSha256": "f49357d06fe0f5358d8d12bffb2530d860731cce7ba1eee87735f4e17dfe14ed",
+      "hunks": [
+        {
+          "before": "// Called only after the owner's final authorization, under canTxBarrierMutex.\n// ULC keeps its own stricter freshness/non-Summon gates even on R79 transport.\nstatic bool ulcSnoozeApplyFinal(uint8_t *data, uint32_t &requestExpire) {\n  const uint32_t now = (uint32_t)millis();\n  if (!ulcSnoozeRequestActive(now) || !autoBlinkerNOAGateOpen(now) || !twaiNonSummonAdmissionOpen() ||\n      !canTxBarrierAllowsMaskedPure(canTxBarrierState, canTxEpochSnapshot(), CAN_TX_FRESH_BOTH)) return false;\n  bool applied = false;\n  portENTER_CRITICAL(&ulcSnoozeMux);\n  if (ulcSnoozePending && (int32_t)(now - ulcSnoozeExpireMs) < 0) {\n    requestExpire = ulcSnoozeExpireMs;\n",
+          "after": "// Called only after the owner's final authorization, under canTxBarrierMutex.\n// ULC keeps its own stricter freshness/non-Summon gates even on R79 transport.\nstatic bool ulcSnoozeApplyFinal(uint8_t *data, uint32_t &requestExpire) {\n  const uint32_t now = (uint32_t)millis();\n  // The caller already owns the nonrecursive TX barrier. Snapshotting it\n  // again would fail and return epoch zero, silently dropping every snooze.\n  if (!ulcSnoozeRequestActive(now) || !autoBlinkerNOAGateOpen(now) || !twaiNonSummonAdmissionOpen() ||\n      !canTxBarrierAllowsMaskedPure(canTxBarrierState, canTxBarrierState.epoch, CAN_TX_FRESH_BOTH)) return false;\n  bool applied = false;\n  portENTER_CRITICAL(&ulcSnoozeMux);\n  if (ulcSnoozePending && (int32_t)(now - ulcSnoozeExpireMs) < 0) {\n    requestExpire = ulcSnoozeExpireMs;\n"
+        }
+      ]
+    }
+  }
+}

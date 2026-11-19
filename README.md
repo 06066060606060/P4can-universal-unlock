@@ -1,8 +1,24 @@
-# P4-CAN Universal Unlock v3.29.3 BETA
+# P4-CAN Universal Unlock v3.35.2
 
 The ultimate solution for accessing all features using an ESP32-P4/C6 board + 3 × SN65HVD230 CAN transceivers.
 
 DOESN'T WORK CORRECTLY BEFORE 2026.20 Update
+
+[Dashboard Simulation](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.html)
+[仪表板模拟](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.zh-CN.html)
+
+**Update 3.35.2**
+- Added GPIO Settings.
+- Added Battery Preheating Beta.
+- Added experimental SmartShift feature from github.com/kl79613/P4Can-automatic-shifting
+- Add FSD visualisation settings. (This will block AP & cause some autopark error!)  
+- Added the S3XY action FSD Visualisation.
+- Added Service mode entry.
+- Organized settings for a better overview
+- Added S3XY actions AP Lane Change
+- Added zh-CN Variant
+  and many more improvements check the changelog.
+
 
 **Highlights:**
 
@@ -63,13 +79,18 @@ Use Arduino-ESP32 3.3.12 with the following settings:
 - Board: `ESP32P4 Dev Module`
 - Chip variant: **Check your chip revision**
 - Flash size: 32 MB
-- Partition scheme: `app5M_fat24M_32MB`
+- Partition scheme: `app3M_fat16M_16MB`
 - PSRAM: enabled
 - USB mode: Hardware CDC/JTAG
 - CDC on boot: enabled
 
+postv3:
 ```text
-esp32:esp32:esp32p4:ChipVariant=postv3,FlashSize=32M,PartitionScheme=app5M_fat24M_32MB,PSRAM=enabled,USBMode=hwcdc,CDCOnBoot=cdc,FlashMode=qio
+esp32:esp32:esp32p4:ChipVariant=postv3,FlashSize=32M,PartitionScheme=app3M_fat9M_16MB,PSRAM=enabled,USBMode=hwcdc,CDCOnBoot=cdc,FlashMode=qio
+```
+prev3:
+```text
+esp32:esp32:esp32p4:ChipVariant=prev3,FlashSize=32M,PartitionScheme=app3M_fat9M_16MB,PSRAM=enabled,USBMode=hwcdc,CDCOnBoot=cdc,FlashMode=qio
 ```
 
 ### Chip revision

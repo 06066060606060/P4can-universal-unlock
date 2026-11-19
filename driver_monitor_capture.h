@@ -127,7 +127,7 @@ static const char *driverMonitorPhysicalBusName(uint8_t bus) {
 }
 
 static const char *driverMonitorProfileBusName(uint8_t bus) {
-  return bus <= 2 ? p4CanNames[p4CanLogicalBus(bus)] : "UNKNOWN";
+  return bus <= 2 ? p4CanRoleName(p4CanLogicalBus(bus)) : "UNKNOWN";
 }
 
 static inline uint32_t driverMonitorAge(uint32_t now, uint32_t ts) {
@@ -462,7 +462,7 @@ static String driverMonitorCaptureStatsToJson() {
   jw.boolean("supported", supported);
   jw.string("canAName", activeProfileCanAName());
   jw.string("canBName", activeProfileCanBName());
-  jw.string("canExtraName", p4CanNames[p4CanBusExtra()]);
+  jw.string("canExtraName", p4CanRoleName(p4CanBusExtra()));
   jw.u32("canAPhysical", p4CanBusA() + 1);
   jw.u32("canBPhysical", p4CanBusB() + 1);
   jw.u32("canExtraPhysical", p4CanBusExtra() + 1);

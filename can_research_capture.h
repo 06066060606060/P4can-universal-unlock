@@ -113,6 +113,14 @@ static constexpr size_t RESEARCH_CAPTURE_SNAPSHOT_MAIN_BYTES = sizeof(ResearchCa
 static constexpr size_t RESEARCH_CAPTURE_RAW_MAIN_BYTES = sizeof(ResearchCaptureRawEntry) * RESEARCH_CAPTURE_RAW_ARCHIVE_CAPACITY;
 static constexpr size_t RESEARCH_CAPTURE_SNAPSHOT_AUX_BYTES = sizeof(ResearchCapturePreState) * RESEARCH_CAPTURE_STATE_COUNT * RESEARCH_CAPTURE_PRE_SLOT_COUNT;
 static constexpr size_t RESEARCH_CAPTURE_RAW_AUX_BYTES = sizeof(ResearchCaptureRawEntry) * RESEARCH_CAPTURE_RAW_PRE_CAPACITY;
+// One fixed PSRAM shadow per ID preserves the state at transaction start.
+// RX saves at most one 14-byte row before mutating it; no CAN-time allocation.
+struct __attribute__((packed)) ResearchCaptureFrozenLatest {
+  uint32_t epoch;
+  ResearchCaptureLatest value;
+};
+static_assert(sizeof(ResearchCaptureFrozenLatest) == 18, "snapshot shadow size changed");
+static constexpr size_t RESEARCH_CAPTURE_FROZEN_BYTES = sizeof(ResearchCaptureFrozenLatest) * RESEARCH_CAPTURE_STATE_COUNT;
 static constexpr size_t RESEARCH_CAPTURE_LATEST_BYTES = sizeof(ResearchCaptureLatest) * RESEARCH_CAPTURE_STATE_COUNT;
 static constexpr size_t RESEARCH_CAPTURE_KNOWN_BYTES = sizeof(uint16_t) * RESEARCH_CAPTURE_STATE_COUNT;
 
@@ -208,6 +216,19 @@ static volatile uint32_t researchCapturePostWindowMs = RESEARCH_CAPTURE_POST_DEF
 static volatile uint8_t researchCaptureMode = RESEARCH_CAPTURE_MODE_SNAPSHOT;
 static volatile bool researchCaptureConfigUpdating = false;
 static volatile bool researchCaptureExporting = false;
+// A synchronous SNAPSHOT transaction releases the mux every 16 rows. The
+// owner token prevents a reset/new transaction from being resumed by old work.
+static bool researchCaptureSnapshotBusy = false;
+// LAB disable latches cancellation even if it is re-enabled before the next chunk.
+static bool researchCaptureSnapshotCancelled = false;
+static uint32_t researchCaptureSnapshotEpoch = 0;
+static uint16_t researchCaptureSnapshotKnownCount = 0;
+static ResearchCapturePreSlot researchCaptureSnapshotTx = {};
+static constexpr uint16_t RESEARCH_CAPTURE_SNAPSHOT_CHUNK = 16;
+static inline ResearchCaptureFrozenLatest *researchCaptureFrozenBase() {
+  return reinterpret_cast<ResearchCaptureFrozenLatest *>(researchCaptureLatest + RESEARCH_CAPTURE_STATE_COUNT);
+}
+
 // RAW modes use mode-sized main/aux PSRAM blocks as a compact 16-byte archive
 // plus an independent rolling PRE ring. This preserves completed segments while PRE
 // recording continues for the next automatic or manual trigger.
@@ -219,6 +240,19 @@ static volatile uint32_t researchCaptureRawPostDeadlineMs = 0;
 static volatile uint32_t researchCaptureRawEvicted = 0;
 static volatile bool researchCaptureRawTriggered = false;
 static volatile uint8_t researchCaptureRawLabelSlot = RESEARCH_CAPTURE_LABEL_NONE;
+// PRE is reserved in the archive at trigger time, then filled by bounded
+// service chunks. Producers preserve the next pending row before overwriting
+// it. The ring write cursor visits frozen rows in chronological order; service
+// only advances that same frontier. No additional PSRAM block is needed.
+static uint32_t researchCaptureRawCopyRingStart = 0;
+static uint32_t researchCaptureRawCopyArchiveStart = 0;
+static uint32_t researchCaptureRawCopyCount = 0;
+static uint32_t researchCaptureRawCopyDone = 0;
+static constexpr uint32_t RESEARCH_CAPTURE_RAW_COPY_CHUNK = 32;
+static constexpr uint32_t RESEARCH_CAPTURE_RAW_COPY_CHUNKS_PER_SERVICE = 16;
+static inline bool researchCaptureRawCopyPendingLocked() {
+  return researchCaptureRawCopyDone < researchCaptureRawCopyCount;
+}
 static ResearchAlcPersistenceState researchCaptureAutoPersistence = researchAlcPersistenceInitialPure();
 static volatile uint8_t researchCaptureAutoLastEvent = 0; // 1=AUTO_CLOSE, 2=AUTO_OPEN
 static volatile uint8_t researchCaptureAutoLastFrom = 0xFF;
@@ -372,7 +406,7 @@ static void researchCaptureLoadConfig() {
 static bool researchCaptureSetConfig(uint32_t preMs, uint32_t postMs) {
   if (!researchCapturePreWindowSupported(preMs) || !researchCapturePostWindowSupported(postMs)) return false;
   portENTER_CRITICAL(&researchCaptureMux);
-  if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING || researchCaptureConfigUpdating || researchCaptureExporting) {
+  if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING || researchCaptureSnapshotBusy || researchCaptureRawCopyPendingLocked() || researchCaptureConfigUpdating || researchCaptureExporting) {
     portEXIT_CRITICAL(&researchCaptureMux);
     return false;
   }
@@ -410,6 +444,7 @@ static bool researchCaptureSetConfig(uint32_t preMs, uint32_t postMs) {
 }
 
 static void researchCaptureReset();
+static void researchCaptureResetOwned(bool configOwner);
 static void researchCaptureReleaseModeBuffers();
 static bool researchCaptureEnsureBuffer();
 
@@ -417,7 +452,7 @@ static bool researchCaptureSetMode(uint8_t mode) {
   if (mode != RESEARCH_CAPTURE_MODE_SNAPSHOT && mode != RESEARCH_CAPTURE_MODE_RAW_TRANSITION) return false;
   uint8_t oldMode;
   portENTER_CRITICAL(&researchCaptureMux);
-  if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING || researchCaptureConfigUpdating || researchCaptureExporting) {
+  if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING || researchCaptureSnapshotBusy || researchCaptureRawCopyPendingLocked() || researchCaptureConfigUpdating || researchCaptureExporting) {
     portEXIT_CRITICAL(&researchCaptureMux);
     return false;
   }
@@ -449,7 +484,7 @@ static bool researchCaptureSetMode(uint8_t mode) {
     (void)researchCaptureEnsureBuffer();
   }
 
-  researchCaptureReset();
+  researchCaptureResetOwned(true);
   portENTER_CRITICAL(&researchCaptureMux);
   researchCaptureConfigUpdating = false;
   if ((!bufferOk || !saved) && !(researchCaptureEntries && researchCapturePreStates))
@@ -472,6 +507,10 @@ static void researchCaptureReleaseModeBuffers() {
   ResearchCaptureEntry *entries = nullptr;
   ResearchCapturePreState *pre = nullptr;
   portENTER_CRITICAL(&researchCaptureMux);
+  if (researchCaptureSnapshotBusy || researchCaptureRawCopyPendingLocked() || researchCaptureExporting) {
+    portEXIT_CRITICAL(&researchCaptureMux);
+    return;
+  }
   entries = researchCaptureEntries;
   pre = researchCapturePreStates;
   researchCaptureEntries = nullptr;
@@ -519,7 +558,7 @@ static bool researchCaptureEnsureBuffer() {
   const bool allocatedLatest = currentLatest == nullptr;
   const bool allocatedKnown = currentKnown == nullptr;
   if (allocatedLatest) latest = (ResearchCaptureLatest *)heap_caps_malloc(
-      RESEARCH_CAPTURE_LATEST_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      RESEARCH_CAPTURE_LATEST_BYTES + RESEARCH_CAPTURE_FROZEN_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (allocatedKnown) known = (uint16_t *)heap_caps_malloc(
       RESEARCH_CAPTURE_KNOWN_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
@@ -537,7 +576,7 @@ static bool researchCaptureEnsureBuffer() {
 
   memset(entries, 0, requiredMainBytes);
   memset(pre, 0, requiredAuxBytes);
-  if (allocatedLatest) memset(latest, 0, RESEARCH_CAPTURE_LATEST_BYTES);
+  if (allocatedLatest) memset(latest, 0, RESEARCH_CAPTURE_LATEST_BYTES + RESEARCH_CAPTURE_FROZEN_BYTES);
   if (allocatedKnown) memset(known, 0, RESEARCH_CAPTURE_KNOWN_BYTES);
 
   portENTER_CRITICAL(&researchCaptureMux);
@@ -587,7 +626,7 @@ static bool researchCaptureInit() {
   P4CAN_SERIAL_PRINTF("CAN Research Capture: %s · %s · main=%u KiB · aux=%u KiB · state=%u KiB · snapshot=%lu rows · raw=%lu frames/%u segments\n",
                 ok ? "PSRAM READY" : "DISABLED", researchCaptureModeName(mode),
                 (unsigned)(mainBytes / 1024U), (unsigned)(auxBytes / 1024U),
-                (unsigned)((RESEARCH_CAPTURE_LATEST_BYTES + RESEARCH_CAPTURE_KNOWN_BYTES) / 1024U),
+                (unsigned)((RESEARCH_CAPTURE_LATEST_BYTES + RESEARCH_CAPTURE_FROZEN_BYTES + RESEARCH_CAPTURE_KNOWN_BYTES) / 1024U),
                 (unsigned long)RESEARCH_CAPTURE_CAPACITY,
                 (unsigned long)RESEARCH_CAPTURE_RAW_ARCHIVE_CAPACITY, (unsigned)RESEARCH_CAPTURE_RAW_MAX_SEGMENTS);
   return ok;
@@ -618,95 +657,150 @@ static inline ResearchCapturePreState *researchCapturePreSlotBase(uint8_t slot) 
   return researchCapturePreStates + ((size_t)slot * RESEARCH_CAPTURE_STATE_COUNT);
 }
 
-static void researchCaptureFillPreSlotLocked(uint8_t slot, uint32_t now) {
-  if (slot >= RESEARCH_CAPTURE_PRE_SLOT_COUNT || !researchCapturePreStates || !researchCaptureLatest || !researchCaptureKnownIndices) return;
+// Caller owns the mux. All accesses after a yield revalidate ownership before
+// dereferencing PSRAM; reset may cancel, detach or replace buffers meanwhile.
+static bool researchCaptureSnapshotAliveLocked(uint32_t epoch) {
+  return researchCaptureSnapshotBusy && !researchCaptureSnapshotCancelled && researchCaptureSnapshotEpoch == epoch &&
+      !researchCaptureConfigUpdating && !researchCaptureExporting &&
+      researchCaptureMode == RESEARCH_CAPTURE_MODE_SNAPSHOT && researchCaptureEntries &&
+      researchCapturePreStates && researchCaptureLatest && researchCaptureKnownIndices;
+}
+
+static bool researchCaptureSnapshotYieldLocked(uint32_t epoch) {
+  portEXIT_CRITICAL(&researchCaptureMux);
+  portENTER_CRITICAL(&researchCaptureMux);
+  return researchCaptureSnapshotAliveLocked(epoch);
+}
+
+static bool researchCaptureSnapshotBeginLocked(uint32_t now) {
+  if (researchCaptureSnapshotBusy || researchCaptureExporting ||
+      researchCaptureConfigUpdating || !researchCaptureEntries || !researchCapturePreStates ||
+      !researchCaptureLatest || !researchCaptureKnownIndices) return false;
+  // Never reuse a shadow generation, including after Reset. Four billion
+  // transactions require a reboot rather than risking stale snapshot rows.
+  if (researchCaptureSnapshotEpoch == UINT32_MAX) {
+    researchCaptureState = RESEARCH_CAPTURE_ERROR;
+    return false;
+  }
+  ++researchCaptureSnapshotEpoch;
+  researchCaptureSnapshotBusy = true;
+  researchCaptureSnapshotCancelled = false;
+  researchCaptureSnapshotKnownCount = researchCaptureKnownIds;
+  researchCaptureSnapshotTx.txValid = researchCaptureTx3f8Valid;
+  researchCaptureSnapshotTx.txDlc = researchCaptureTx3f8Dlc;
+  researchCaptureSnapshotTx.txOk = researchCaptureTx3f8Ok;
+  researchCaptureSnapshotTx.txAgeMs = researchCaptureTx3f8Valid ? researchCaptureAge16(now, researchCaptureTx3f8Ms) : 65535U;
+  memcpy(researchCaptureSnapshotTx.txData, researchCaptureTx3f8Data, 8);
+  return true;
+}
+
+static const ResearchCaptureLatest &researchCaptureSnapshotLatestLocked(uint16_t index) {
+  const ResearchCaptureFrozenLatest &frozen = researchCaptureFrozenBase()[index];
+  return frozen.epoch == researchCaptureSnapshotEpoch ? frozen.value : researchCaptureLatest[index];
+}
+
+static bool researchCaptureFillPreSlotLocked(uint8_t slot, uint32_t now) {
+  const uint32_t epoch = researchCaptureSnapshotEpoch;
   ResearchCapturePreSlot &meta = researchCapturePreSlots[slot];
+  meta.valid = 0; // An interrupted fill must never publish partial history.
   ResearchCapturePreState *dst = researchCapturePreSlotBase(slot);
   uint16_t copied = 0;
-  const uint16_t knownCount = researchCaptureKnownIds;
-  for (uint16_t i = 0; i < knownCount && copied < RESEARCH_CAPTURE_STATE_COUNT; i++) {
+  const uint16_t knownCount = researchCaptureSnapshotKnownCount;
+  for (uint16_t i = 0; i < knownCount; i++) {
+    if (i % RESEARCH_CAPTURE_SNAPSHOT_CHUNK == 0 && !researchCaptureSnapshotYieldLocked(epoch)) return false;
     const uint16_t stateIdx = researchCaptureKnownIndices[i];
     if (stateIdx >= RESEARCH_CAPTURE_STATE_COUNT) continue;
-    const ResearchCaptureLatest &s = researchCaptureLatest[stateIdx];
-    if (!s.valid) continue;
-    ResearchCapturePreState &p = dst[copied++];
-    p.stateIndex = stateIdx;
-    p.frameAgeMs = researchCaptureAge16(now, s.lastSeenMs);
-    p.dlc = s.dlc;
-    memcpy(p.data, s.data, sizeof(p.data));
+    const ResearchCaptureLatest &value = researchCaptureSnapshotLatestLocked(stateIdx);
+    if (!value.valid) continue;
+    ResearchCapturePreState &row = dst[copied++];
+    row.stateIndex = stateIdx;
+    row.frameAgeMs = researchCaptureAge16(now, value.lastSeenMs);
+    row.dlc = value.dlc;
+    memcpy(row.data, value.data, sizeof(row.data));
   }
+  meta = researchCaptureSnapshotTx;
   meta.snapshotMs = now;
   meta.count = copied;
   meta.valid = 1;
-  meta.txValid = researchCaptureTx3f8Valid;
-  meta.txDlc = researchCaptureTx3f8Dlc;
-  meta.txOk = researchCaptureTx3f8Ok;
-  meta.txAgeMs = researchCaptureTx3f8Valid ? researchCaptureAge16(now, researchCaptureTx3f8Ms) : 65535U;
-  memcpy(meta.txData, researchCaptureTx3f8Data, sizeof(meta.txData));
+  return researchCaptureSnapshotYieldLocked(epoch);
 }
 
-static void researchCaptureTakeDensePreSnapshotLocked(uint32_t now) {
-  const uint8_t slot = researchCapturePreHead;
-  researchCaptureFillPreSlotLocked(slot, now);
+static bool researchCaptureTakeDensePreSnapshotLocked(uint32_t now) {
+  if (!researchCaptureFillPreSlotLocked(researchCapturePreHead, now)) return false;
   researchCapturePreHead = (uint8_t)((researchCapturePreHead + 1U) % RESEARCH_CAPTURE_PRE_DENSE_SLOT_COUNT);
   if (researchCapturePreValidCount < RESEARCH_CAPTURE_PRE_DENSE_SLOT_COUNT) researchCapturePreValidCount++;
   researchCaptureLastPreSnapshotMs = now;
+  return true;
 }
 
-static void researchCaptureTakeExtendedPreSnapshotLocked(uint32_t now) {
+static bool researchCaptureTakeExtendedPreSnapshotLocked(uint32_t now) {
   const uint8_t slot = (uint8_t)(RESEARCH_CAPTURE_PRE_DENSE_SLOT_COUNT + researchCapturePreExtHead);
-  researchCaptureFillPreSlotLocked(slot, now);
+  if (!researchCaptureFillPreSlotLocked(slot, now)) return false;
   researchCapturePreExtHead = (uint8_t)((researchCapturePreExtHead + 1U) % RESEARCH_CAPTURE_PRE_EXT_SLOT_COUNT);
   if (researchCapturePreExtValidCount < RESEARCH_CAPTURE_PRE_EXT_SLOT_COUNT) researchCapturePreExtValidCount++;
   researchCaptureLastPreExtSnapshotMs = now;
+  return true;
 }
 
 static uint16_t researchCaptureAppendCurrentSnapshotLocked(uint32_t now, int16_t relativeMs,
      uint16_t segment, uint8_t labelSlot) {
+  const uint32_t epoch = researchCaptureSnapshotEpoch;
   uint16_t copied = 0;
-  const uint16_t knownCount = researchCaptureKnownIds;
+  const uint16_t knownCount = researchCaptureSnapshotKnownCount;
   for (uint16_t i = 0; i < knownCount; i++) {
+    if (i % RESEARCH_CAPTURE_SNAPSHOT_CHUNK == 0 && !researchCaptureSnapshotYieldLocked(epoch)) return UINT16_MAX;
     const uint16_t stateIdx = researchCaptureKnownIndices[i];
     if (stateIdx >= RESEARCH_CAPTURE_STATE_COUNT) continue;
-    const ResearchCaptureLatest &s = researchCaptureLatest[stateIdx];
-    if (!s.valid) continue;
-    const uint8_t bus = stateIdx / RESEARCH_CAPTURE_IDS_PER_BUS;
-    const uint16_t id = (uint16_t)(stateIdx % RESEARCH_CAPTURE_IDS_PER_BUS);
-    researchCaptureAppendLocked(segment, relativeMs, id, researchCaptureAge16(now, s.lastSeenMs),
-       bus, s.dlc, labelSlot, 0, s.data);
+    const ResearchCaptureLatest &value = researchCaptureSnapshotLatestLocked(stateIdx);
+    if (!value.valid) continue;
+    researchCaptureAppendLocked(segment, relativeMs, stateIdx % RESEARCH_CAPTURE_IDS_PER_BUS,
+        researchCaptureAge16(now, value.lastSeenMs), stateIdx / RESEARCH_CAPTURE_IDS_PER_BUS,
+        value.dlc, labelSlot, 0, value.data);
     copied++;
   }
-  if (researchCaptureTx3f8Valid) {
-    const uint8_t flags = (uint8_t)(RESEARCH_CAPTURE_FLAG_TX | (researchCaptureTx3f8Ok ? RESEARCH_CAPTURE_FLAG_TX_OK : 0));
-    researchCaptureAppendLocked(segment, relativeMs, 0x3F8, researchCaptureAge16(now, researchCaptureTx3f8Ms),
-       RESEARCH_CAPTURE_BUS_VH, researchCaptureTx3f8Dlc, labelSlot, flags, researchCaptureTx3f8Data);
+  const ResearchCapturePreSlot &tx = researchCaptureSnapshotTx;
+  if (tx.txValid) {
+    const uint8_t flags = (uint8_t)(RESEARCH_CAPTURE_FLAG_TX | (tx.txOk ? RESEARCH_CAPTURE_FLAG_TX_OK : 0));
+    researchCaptureAppendLocked(segment, relativeMs, 0x3F8, tx.txAgeMs,
+        RESEARCH_CAPTURE_BUS_VH, tx.txDlc, labelSlot, flags, tx.txData);
     copied++;
   }
-  return copied;
+  return researchCaptureSnapshotYieldLocked(epoch) ? copied : UINT16_MAX;
 }
 
 static uint16_t researchCaptureAppendPreSlotLocked(uint8_t slot, uint32_t triggerNow,
       uint16_t segment, uint8_t labelSlot) {
-  if (slot >= RESEARCH_CAPTURE_PRE_SLOT_COUNT || !researchCapturePreSlots[slot].valid) return 0;
-  const ResearchCapturePreSlot &meta = researchCapturePreSlots[slot];
+  if (!researchCapturePreSlots[slot].valid) return 0;
+  const uint32_t epoch = researchCaptureSnapshotEpoch;
+  const ResearchCapturePreSlot meta = researchCapturePreSlots[slot];
   const uint32_t age = (uint32_t)(triggerNow - meta.snapshotMs);
   const int16_t relativeMs = -(int16_t)(age > 32767U ? 32767U : age);
   const ResearchCapturePreState *src = researchCapturePreSlotBase(slot);
   uint16_t copied = 0;
   for (uint16_t i = 0; i < meta.count; i++) {
-    const ResearchCapturePreState &p = src[i];
-    const uint8_t bus = p.stateIndex / RESEARCH_CAPTURE_IDS_PER_BUS;
-    const uint16_t id = (uint16_t)(p.stateIndex % RESEARCH_CAPTURE_IDS_PER_BUS);
-    researchCaptureAppendLocked(segment, relativeMs, id, p.frameAgeMs, bus, p.dlc, labelSlot, 0, p.data);
+    if (i % RESEARCH_CAPTURE_SNAPSHOT_CHUNK == 0 && !researchCaptureSnapshotYieldLocked(epoch)) return UINT16_MAX;
+    const ResearchCapturePreState &row = src[i];
+    researchCaptureAppendLocked(segment, relativeMs, row.stateIndex % RESEARCH_CAPTURE_IDS_PER_BUS,
+        row.frameAgeMs, row.stateIndex / RESEARCH_CAPTURE_IDS_PER_BUS,
+        row.dlc, labelSlot, 0, row.data);
     copied++;
   }
   if (meta.txValid) {
     const uint8_t flags = (uint8_t)(RESEARCH_CAPTURE_FLAG_TX | (meta.txOk ? RESEARCH_CAPTURE_FLAG_TX_OK : 0));
     researchCaptureAppendLocked(segment, relativeMs, 0x3F8, meta.txAgeMs,
-       RESEARCH_CAPTURE_BUS_VH, meta.txDlc, labelSlot, flags, meta.txData);
+        RESEARCH_CAPTURE_BUS_VH, meta.txDlc, labelSlot, flags, meta.txData);
     copied++;
   }
-  return copied;
+  return researchCaptureSnapshotYieldLocked(epoch) ? copied : UINT16_MAX;
+}
+
+// Roll back rows written by this transaction only. Reset/new-owner state must
+// never be overwritten by an old stack frame resuming after its yield.
+static void researchCaptureSnapshotAbortLocked(uint32_t epoch, uint32_t initialCount) {
+  if (!researchCaptureSnapshotBusy || researchCaptureSnapshotEpoch != epoch) return;
+  researchCaptureCount = initialCount;
+  researchCaptureSnapshotBusy = false;
+  if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING) researchCaptureState = RESEARCH_CAPTURE_PAUSED;
 }
 
 static inline ResearchCaptureRawEntry *researchCaptureRawArchiveBase() {
@@ -736,12 +830,17 @@ static void researchCaptureRawPreAppendLocked(uint8_t bus, uint16_t id, uint8_t 
   ResearchCaptureRawEntry *pre = researchCaptureRawPreBase();
   if (!pre) return;
 
-  while (researchCaptureRawPreFrameCount > 0) {
-    const ResearchCaptureRawEntry &oldest = pre[researchCaptureRawPreStartIndex];
-    if ((uint32_t)(now - oldest.timestampMs) <= RESEARCH_CAPTURE_RAW_MANUAL_PRE_MS) break;
-    researchCaptureRawPreStartIndex = (researchCaptureRawPreStartIndex + 1U) % RESEARCH_CAPTURE_RAW_PRE_CAPACITY;
-    researchCaptureRawPreFrameCount--;
-    researchCaptureRawEvicted++;
+  // Binary-search expired history: a quiet period must not scan 32768
+  // timestamps with interrupts disabled on the next observed frame.
+  if (researchCaptureRawPreFrameCount &&
+      (uint32_t)(now - pre[researchCaptureRawPreStartIndex].timestampMs) > RESEARCH_CAPTURE_RAW_MANUAL_PRE_MS) {
+    const ResearchRawCopyPlan retained = researchRawCopyPlanPure(
+        pre, RESEARCH_CAPTURE_RAW_PRE_CAPACITY, researchCaptureRawPreStartIndex,
+        researchCaptureRawPreFrameCount, now, RESEARCH_CAPTURE_RAW_MANUAL_PRE_MS,
+        RESEARCH_CAPTURE_RAW_PRE_CAPACITY);
+    researchCaptureRawEvicted += researchCaptureRawPreFrameCount - retained.count;
+    researchCaptureRawPreStartIndex = retained.ringStart;
+    researchCaptureRawPreFrameCount = retained.count;
   }
   if (researchCaptureRawPreFrameCount >= RESEARCH_CAPTURE_RAW_PRE_CAPACITY) {
     researchCaptureRawPreStartIndex = (researchCaptureRawPreStartIndex + 1U) % RESEARCH_CAPTURE_RAW_PRE_CAPACITY;
@@ -750,6 +849,11 @@ static void researchCaptureRawPreAppendLocked(uint8_t bus, uint16_t id, uint8_t 
   }
 
   const uint32_t idx = (researchCaptureRawPreStartIndex + researchCaptureRawPreFrameCount) % RESEARCH_CAPTURE_RAW_PRE_CAPACITY;
+  if (researchCaptureRawCopyPendingLocked() && idx ==
+      (researchCaptureRawCopyRingStart + researchCaptureRawCopyDone) % RESEARCH_CAPTURE_RAW_PRE_CAPACITY) {
+    researchCaptureRawArchiveBase()[researchCaptureRawCopyArchiveStart + researchCaptureRawCopyDone] = pre[idx];
+    researchCaptureRawCopyDone++;
+  }
   ResearchCaptureRawEntry &e = pre[idx];
   e.timestampMs = now;
   e.id = id;
@@ -799,15 +903,12 @@ static uint32_t researchCaptureRawCopyPreLocked(uint32_t triggerNow, uint32_t pr
     return 0;
   }
 
-  const uint32_t contiguous = RESEARCH_CAPTURE_RAW_PRE_CAPACITY - plan.ringStart;
-  const uint32_t firstCount = plan.count < contiguous ? plan.count : contiguous;
-  memcpy(archive + researchCaptureRawArchiveCount, pre + plan.ringStart,
-         firstCount * sizeof(ResearchCaptureRawEntry));
-  const uint32_t secondCount = plan.count - firstCount;
-  if (secondCount) {
-    memcpy(archive + researchCaptureRawArchiveCount + firstCount, pre,
-           secondCount * sizeof(ResearchCaptureRawEntry));
-  }
+  // Reserve before POST append. Only the service or the producer that is
+  // about to overwrite the next frozen row may fill this immutable range.
+  researchCaptureRawCopyRingStart = plan.ringStart;
+  researchCaptureRawCopyArchiveStart = researchCaptureRawArchiveCount;
+  researchCaptureRawCopyCount = plan.count;
+  researchCaptureRawCopyDone = 0;
   researchCaptureRawArchiveCount += plan.count;
   researchCaptureCount = researchCaptureRawArchiveCount;
   if (researchCaptureSegment > 0 && researchCaptureSegment <= RESEARCH_CAPTURE_MAX_SEGMENTS) {
@@ -818,6 +919,27 @@ static uint32_t researchCaptureRawCopyPreLocked(uint32_t triggerNow, uint32_t pr
     researchCaptureState = RESEARCH_CAPTURE_FULL;
   }
   return plan.count;
+}
+
+// Called only by the web task service, never the RX/automatic-trigger path.
+// Each lock copies at most 32 * 16 = 512 bytes. Reset can cancel between
+// chunks; all pointers and cursors are acquired afresh under the next lock.
+static void researchCaptureService() {
+  for (uint32_t chunk = 0; chunk < RESEARCH_CAPTURE_RAW_COPY_CHUNKS_PER_SERVICE; ++chunk) {
+    portENTER_CRITICAL(&researchCaptureMux);
+    if (!researchCaptureRawCopyPendingLocked() || researchCaptureConfigUpdating || researchCaptureExporting) {
+      portEXIT_CRITICAL(&researchCaptureMux);
+      return;
+    }
+    const uint32_t index = (researchCaptureRawCopyRingStart + researchCaptureRawCopyDone) % RESEARCH_CAPTURE_RAW_PRE_CAPACITY;
+    uint32_t count = researchCaptureRawCopyCount - researchCaptureRawCopyDone;
+    if (count > RESEARCH_CAPTURE_RAW_COPY_CHUNK) count = RESEARCH_CAPTURE_RAW_COPY_CHUNK;
+    if (count > RESEARCH_CAPTURE_RAW_PRE_CAPACITY - index) count = RESEARCH_CAPTURE_RAW_PRE_CAPACITY - index;
+    memcpy(researchCaptureRawArchiveBase() + researchCaptureRawCopyArchiveStart + researchCaptureRawCopyDone,
+           researchCaptureRawPreBase() + index, count * sizeof(ResearchCaptureRawEntry));
+    researchCaptureRawCopyDone += count;
+    portEXIT_CRITICAL(&researchCaptureMux);
+  }
 }
 
 static bool researchCaptureAutoLaneQualifiedLocked(uint32_t now) {
@@ -963,7 +1085,7 @@ static void researchCaptureRawObserveLocked(uint8_t bus, uint16_t id, uint8_t dl
 
 static bool researchCaptureRawRequestAtLocked(uint8_t labelSlot, uint32_t triggerNow,
                                                    uint32_t captureNow, uint32_t preWindowMs) {
-  if (researchCaptureExporting || researchCaptureState != RESEARCH_CAPTURE_READY || researchCaptureRawTriggered) return false;
+  if (researchCaptureExporting || researchCaptureRawCopyPendingLocked() || researchCaptureState != RESEARCH_CAPTURE_READY || researchCaptureRawTriggered) return false;
   if (labelSlot >= RESEARCH_CAPTURE_LABEL_SLOTS) return false;
   if (researchCaptureSegment >= RESEARCH_CAPTURE_RAW_MAX_SEGMENTS ||
       researchCaptureRawArchiveCount >= RESEARCH_CAPTURE_RAW_ARCHIVE_CAPACITY) {
@@ -1004,7 +1126,7 @@ static bool researchCaptureRawRequestAtLocked(uint8_t labelSlot, uint32_t trigge
   researchCaptureRawLabelSlot = labelSlot;
   researchCaptureState = RESEARCH_CAPTURE_CAPTURING;
 
-  // AUTO persistence confirms the event after t0. Copy PRE through confirmation
+  // AUTO persistence confirms the event after t0. Reserve PRE through confirmation
   // while widening the copy window by the same delay, preserving exactly the
   // requested preWindowMs before the original transition and the first 300 ms
   // of post-transition traffic that accumulated in the rolling PRE ring.
@@ -1024,17 +1146,23 @@ static void researchCaptureTick(uint32_t now) {
   // A mode change can detach/free the mode-specific buffers between the fast
   // pointer check above and this lock acquisition. Revalidate under the lock
   // before dereferencing either archive/history block.
-  if (researchCaptureConfigUpdating || !researchCaptureEntries || !researchCaptureLatest ||
+  if (researchCaptureSnapshotBusy || researchCaptureConfigUpdating || !researchCaptureEntries || !researchCaptureLatest ||
       !researchCapturePreStates || !researchCaptureKnownIndices) {
     portEXIT_CRITICAL(&researchCaptureMux);
     return;
   }
 
   if (researchCaptureModeIsRaw(researchCaptureMode)) {
-    if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING && researchCaptureRawTriggered &&
+    if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING &&
         (int32_t)(now - researchCaptureRawPostDeadlineMs) >= 0) {
-      researchCaptureCompletedSegments++;
+      // Stop POST at the existing tick deadline even if the web service has
+      // been delayed. Keep CAPTURING until reserved PRE bytes are all valid.
       researchCaptureRawTriggered = false;
+      if (researchCaptureRawCopyPendingLocked()) {
+        portEXIT_CRITICAL(&researchCaptureMux);
+        return;
+      }
+      researchCaptureCompletedSegments++;
       researchCaptureRawLabelSlot = RESEARCH_CAPTURE_LABEL_NONE;
       researchCaptureCurrentLabelSlot = RESEARCH_CAPTURE_LABEL_NONE;
       researchCaptureStartMs = 0;
@@ -1052,15 +1180,41 @@ static void researchCaptureTick(uint32_t now) {
     return;
   }
 
-  if (researchCaptureLastPreSnapshotMs == 0 ||
-      (uint32_t)(now - researchCaptureLastPreSnapshotMs) >= RESEARCH_CAPTURE_PRE_DENSE_INTERVAL_MS) {
-    researchCaptureTakeDensePreSnapshotLocked(now);
+  const uint32_t extInterval = researchCaptureExtendedIntervalMs(researchCapturePreWindowMs);
+  const bool denseDue = researchCaptureLastPreSnapshotMs == 0 ||
+      (uint32_t)(now - researchCaptureLastPreSnapshotMs) >= RESEARCH_CAPTURE_PRE_DENSE_INTERVAL_MS;
+  const bool extendedDue = extInterval != 0 && (researchCaptureLastPreExtSnapshotMs == 0 ||
+      (uint32_t)(now - researchCaptureLastPreExtSnapshotMs) >= extInterval);
+  const bool postDue = researchCaptureState == RESEARCH_CAPTURE_CAPTURING &&
+      researchCaptureNextPostIndex < researchCapturePostCountForWindow(researchCapturePostWindowMs) &&
+      (uint32_t)(now - researchCaptureStartMs) >= RESEARCH_CAPTURE_POST_TARGETS[researchCaptureNextPostIndex];
+  if (!denseDue && !extendedDue && !postDue) {
+    portEXIT_CRITICAL(&researchCaptureMux);
+    return;
+  }
+  if (!researchCaptureSnapshotBeginLocked(now)) {
+    portEXIT_CRITICAL(&researchCaptureMux);
+    return;
+  }
+  const uint32_t epoch = researchCaptureSnapshotEpoch;
+  const uint32_t initialCount = researchCaptureCount;
+  const uint8_t initialPostIndex = researchCaptureNextPostIndex;
+  const uint8_t initialPostCopied = researchCaptureLastPostSnapshotsCopied;
+  const auto abortSnapshot = [&]() {
+    if (researchCaptureSnapshotBusy && researchCaptureSnapshotEpoch == epoch) {
+      researchCaptureNextPostIndex = initialPostIndex;
+      researchCaptureLastPostSnapshotsCopied = initialPostCopied;
+    }
+    researchCaptureSnapshotAbortLocked(epoch, initialCount);
+    portEXIT_CRITICAL(&researchCaptureMux);
+  };
+
+  if (denseDue) {
+    if (!researchCaptureTakeDensePreSnapshotLocked(now)) { abortSnapshot(); return; }
   }
 
-  const uint32_t extInterval = researchCaptureExtendedIntervalMs(researchCapturePreWindowMs);
-  if (extInterval != 0 && (researchCaptureLastPreExtSnapshotMs == 0 ||
-      (uint32_t)(now - researchCaptureLastPreExtSnapshotMs) >= extInterval)) {
-    researchCaptureTakeExtendedPreSnapshotLocked(now);
+  if (extendedDue) {
+    if (!researchCaptureTakeExtendedPreSnapshotLocked(now)) { abortSnapshot(); return; }
   }
 
   if (researchCaptureState == RESEARCH_CAPTURE_CAPTURING) {
@@ -1069,8 +1223,8 @@ static void researchCaptureTick(uint32_t now) {
     while (researchCaptureNextPostIndex < postCount &&
  elapsed >= RESEARCH_CAPTURE_POST_TARGETS[researchCaptureNextPostIndex]) {
       const uint16_t target = RESEARCH_CAPTURE_POST_TARGETS[researchCaptureNextPostIndex];
-      researchCaptureAppendCurrentSnapshotLocked(now, (int16_t)target,
-    researchCaptureSegment, researchCaptureCurrentLabelSlot);
+      if (researchCaptureAppendCurrentSnapshotLocked(now, (int16_t)target,
+          researchCaptureSegment, researchCaptureCurrentLabelSlot) == UINT16_MAX) { abortSnapshot(); return; }
       researchCaptureLastPostSnapshotsCopied++;
       researchCaptureNextPostIndex++;
       if (researchCaptureCount >= RESEARCH_CAPTURE_CAPACITY) {
@@ -1085,19 +1239,19 @@ static void researchCaptureTick(uint32_t now) {
     }
   }
 
+  researchCaptureSnapshotBusy = false;
   portEXIT_CRITICAL(&researchCaptureMux);
 }
 
 static bool researchCaptureRequest(uint8_t labelSlot) {
-  if (!labMenuEnabled) return false;
   if (!researchCaptureEnsureBuffer()) return false;
   if (labelSlot >= RESEARCH_CAPTURE_LABEL_SLOTS) return false;
-  const uint32_t triggerNow = (uint32_t)millis();
-  researchCaptureTick(triggerNow);
+  researchCaptureTick((uint32_t)millis());
 
   portENTER_CRITICAL(&researchCaptureMux);
+  const uint32_t triggerNow = (uint32_t)millis();
   researchCaptureRequests++;
-  if (researchCaptureExporting) {
+  if (researchCaptureSnapshotBusy || researchCaptureExporting) {
     researchCaptureIgnored++;
     portEXIT_CRITICAL(&researchCaptureMux);
     return false;
@@ -1144,6 +1298,40 @@ static bool researchCaptureRequest(uint8_t labelSlot) {
     return false;
   }
 
+  if (!researchCaptureSnapshotBeginLocked(triggerNow)) {
+    researchCaptureIgnored++;
+    portEXIT_CRITICAL(&researchCaptureMux);
+    return false;
+  }
+  const uint32_t epoch = researchCaptureSnapshotEpoch;
+  const uint32_t initialCount = researchCaptureCount;
+  const uint16_t initialSegment = researchCaptureSegment;
+  const uint8_t initialState = researchCaptureState;
+  const uint8_t initialLabel = researchCaptureCurrentLabelSlot;
+  const uint8_t initialLastLabel = researchCaptureLastLabelSlot;
+  const uint32_t initialStart = researchCaptureStartMs;
+  const uint8_t initialPostIndex = researchCaptureNextPostIndex;
+  const uint8_t initialPreCopied = researchCaptureLastPreSnapshotsCopied;
+  const uint8_t initialPostCopied = researchCaptureLastPostSnapshotsCopied;
+  const uint16_t initialTriggerRows = researchCaptureLastTriggerRows;
+  const auto abortSnapshot = [&]() {
+    if (researchCaptureSnapshotBusy && researchCaptureSnapshotEpoch == epoch) {
+      researchCaptureSegment = initialSegment;
+      researchCaptureState = initialState;
+      researchCaptureCurrentLabelSlot = initialLabel;
+      researchCaptureLastLabelSlot = initialLastLabel;
+      researchCaptureStartMs = initialStart;
+      researchCaptureNextPostIndex = initialPostIndex;
+      researchCaptureLastPreSnapshotsCopied = initialPreCopied;
+      researchCaptureLastPostSnapshotsCopied = initialPostCopied;
+      researchCaptureLastTriggerRows = initialTriggerRows;
+      researchCaptureIgnored++;
+    }
+    researchCaptureSnapshotAbortLocked(epoch, initialCount);
+    portEXIT_CRITICAL(&researchCaptureMux);
+    return false;
+  };
+
   researchCaptureSegment++;
   const uint16_t segment = researchCaptureSegment;
   researchCaptureCurrentLabelSlot = labelSlot;
@@ -1181,7 +1369,7 @@ static bool researchCaptureRequest(uint8_t labelSlot) {
       if (!researchCapturePreSlots[slot].valid) continue;
       const uint32_t age = (uint32_t)(triggerNow - researchCapturePreSlots[slot].snapshotMs);
       if (age == 0 || age <= RESEARCH_CAPTURE_PRE_DENSE_HORIZON_MS || age > preWindow + RESEARCH_CAPTURE_PRE_DENSE_INTERVAL_MS) continue;
-      researchCaptureAppendPreSlotLocked(slot, triggerNow, segment, labelSlot);
+      if (researchCaptureAppendPreSlotLocked(slot, triggerNow, segment, labelSlot) == UINT16_MAX) return abortSnapshot();
       researchCaptureLastPreSnapshotsCopied++;
     }
   }
@@ -1194,11 +1382,14 @@ static bool researchCaptureRequest(uint8_t labelSlot) {
     if (!researchCapturePreSlots[slot].valid) continue;
     const uint32_t age = (uint32_t)(triggerNow - researchCapturePreSlots[slot].snapshotMs);
     if (age == 0 || age > denseLimit + RESEARCH_CAPTURE_PRE_DENSE_INTERVAL_MS) continue;
-    researchCaptureAppendPreSlotLocked(slot, triggerNow, segment, labelSlot);
+    if (researchCaptureAppendPreSlotLocked(slot, triggerNow, segment, labelSlot) == UINT16_MAX) return abortSnapshot();
     researchCaptureLastPreSnapshotsCopied++;
   }
 
-  researchCaptureLastTriggerRows = researchCaptureAppendCurrentSnapshotLocked(triggerNow, 0, segment, labelSlot);
+  const uint16_t triggerRows = researchCaptureAppendCurrentSnapshotLocked(triggerNow, 0, segment, labelSlot);
+  if (triggerRows == UINT16_MAX) return abortSnapshot();
+  researchCaptureLastTriggerRows = triggerRows;
+  researchCaptureSnapshotBusy = false;
   researchCaptureState = researchCaptureCount >= RESEARCH_CAPTURE_CAPACITY ? RESEARCH_CAPTURE_FULL : RESEARCH_CAPTURE_CAPTURING;
   const bool accepted = researchCaptureState == RESEARCH_CAPTURE_CAPTURING;
   if (!accepted) researchCaptureIgnored++;
@@ -1207,7 +1398,6 @@ static bool researchCaptureRequest(uint8_t labelSlot) {
 }
 
 static void researchCaptureObserve(uint8_t bus, uint16_t id, uint8_t dlc, const uint8_t *data) {
-  if (!labMenuEnabled) return;
   if (!data || id > 0x7FFU || bus > RESEARCH_CAPTURE_BUS_EXTRA) return;
   if (!researchCaptureLatest || !researchCaptureKnownIndices) return;
   const uint8_t n = dlc > 8 ? 8 : dlc;
@@ -1227,13 +1417,21 @@ static void researchCaptureObserve(uint8_t bus, uint16_t id, uint8_t dlc, const 
     return;
   }
   // Timestamp under the capture lock so Party/VH task preemption cannot append
-  // out-of-order RAW entries and violate the bulk-copy planner's chronology.
+  // out-of-order RAW entries and violate the copy planner's chronology.
   const uint32_t now = (uint32_t)millis();
   const bool researchCaptureRawTracksLatest = !researchCaptureModeIsRaw(researchCaptureMode) ||
       researchCaptureMode == RESEARCH_CAPTURE_MODE_ULC_CONFIRM ||
       (bus == RESEARCH_CAPTURE_BUS_PARTY && (id == 0x239 || id == 0x399));
   if (researchCaptureRawTracksLatest) {
     ResearchCaptureLatest &s = researchCaptureLatest[stateIdx];
+    if (researchCaptureSnapshotBusy) {
+      ResearchCaptureFrozenLatest &frozen = researchCaptureFrozenBase()[stateIdx];
+      if (frozen.epoch != researchCaptureSnapshotEpoch) {
+        memcpy(&frozen.value, &s, sizeof(s));
+        frozen.epoch = researchCaptureSnapshotEpoch;
+      }
+    }
+
     if (!s.valid) {
       if (researchCaptureKnownIds < RESEARCH_CAPTURE_STATE_COUNT)
         researchCaptureKnownIndices[researchCaptureKnownIds++] = stateIdx;
@@ -1261,7 +1459,6 @@ static inline void researchCaptureObserveVh(uint16_t id, uint8_t dlc, const uint
 }
 
 static inline void researchCaptureObserveTxVh(uint16_t id, uint8_t dlc, const uint8_t *data, bool txOk) {
-  if (!labMenuEnabled) return;
   if (id != 0x3F8 || !data) return;
   const uint8_t n = dlc > 8 ? 8 : dlc;
   portENTER_CRITICAL(&researchCaptureMux);
@@ -1274,13 +1471,14 @@ static inline void researchCaptureObserveTxVh(uint16_t id, uint8_t dlc, const ui
   portEXIT_CRITICAL(&researchCaptureMux);
 }
 
-static void researchCaptureReset() {
+static void researchCaptureResetOwned(bool configOwner) {
   portENTER_CRITICAL(&researchCaptureMux);
-  if (researchCaptureExporting) {
+  if (researchCaptureExporting || (researchCaptureConfigUpdating && !configOwner)) {
     researchCaptureIgnored++;
     portEXIT_CRITICAL(&researchCaptureMux);
     return;
   }
+  researchCaptureSnapshotBusy = false;
   researchCaptureCount = 0;
   researchCaptureSegment = 0;
   researchCaptureCompletedSegments = 0;
@@ -1291,6 +1489,8 @@ static void researchCaptureReset() {
   researchCaptureRequests = 0;
   researchCaptureIgnored = 0;
   researchCaptureDropped = 0;
+  researchCaptureRawCopyCount = 0;
+  researchCaptureRawCopyDone = 0;
   researchCaptureRawArchiveCount = 0;
   researchCaptureRawPreStartIndex = 0;
   researchCaptureRawPreFrameCount = 0;
@@ -1329,4 +1529,9 @@ static void researchCaptureReset() {
   researchCaptureState = (researchCaptureEntries && researchCaptureLatest && researchCapturePreStates && researchCaptureKnownIndices)
                   ? RESEARCH_CAPTURE_READY : RESEARCH_CAPTURE_ERROR;
   portEXIT_CRITICAL(&researchCaptureMux);
+}
+
+// Keep the public no-argument declaration in p4can_forward.h unchanged.
+static void researchCaptureReset() {
+  researchCaptureResetOwned(false);
 }

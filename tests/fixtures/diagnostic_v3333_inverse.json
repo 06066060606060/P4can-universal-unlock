@@ -1,0 +1,37 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.33.2",
+  "scope": "Exact RX flag initialization/normalization, CAN-B local initialization and version identity only. Every inverse must recover the immutable immediate-base hash; no production file exemptions.",
+  "files": {
+    "@sketch": {
+      "baseSha256": "65b19ca208d7dedad38ccf6a21ded88bde5b8bf25bc67dddbcbe012616e5d4b1",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.33.2 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.33.3 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.2\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.3\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        }
+      ]
+    },
+    "p4_can.h": {
+      "baseSha256": "809abea9b8f9303f61ed824af713421de494e6c824a03554fcef0525a478811c",
+      "hunks": [
+        {
+          "before": "  if (!out || bus >= P4_CAN_COUNT) return ESP_ERR_INVALID_ARG;\n  if (!p4CanHandles[bus]) return ESP_ERR_INVALID_STATE;\n  __atomic_add_fetch(&p4CanRxPolls[bus], 1U, __ATOMIC_RELAXED);\n  const esp_err_t err = twai_receive_v2(p4CanHandles[bus], out, wait);\n  p4CanLastRxResult[bus] = err;\n  if (err == ESP_OK) {\n    P4_CAN_DIAG_RX(bus);\n    p4CanObserveRx(bus);\n    P4_R79_TIMING_RX(bus, *out);\n",
+          "after": "  if (!out || bus >= P4_CAN_COUNT) return ESP_ERR_INVALID_ARG;\n  if (!p4CanHandles[bus]) return ESP_ERR_INVALID_STATE;\n  __atomic_add_fetch(&p4CanRxPolls[bus], 1U, __ATOMIC_RELAXED);\n  // Native RX writes EXT/RTR only. Copied RX templates must not inherit\n  // stale TX-only SS/SELF or reserved bits from the destination object.\n  out->flags = 0;\n  const esp_err_t err = twai_receive_v2(p4CanHandles[bus], out, wait);\n  p4CanLastRxResult[bus] = err;\n  if (err == ESP_OK) {\n    out->flags &= TWAI_MSG_FLAG_EXTD | TWAI_MSG_FLAG_RTR;\n    P4_CAN_DIAG_RX(bus);\n    p4CanObserveRx(bus);\n    P4_R79_TIMING_RX(bus, *out);\n"
+        }
+      ]
+    },
+    "can_runtime.h": {
+      "baseSha256": "83ccc02b8acf0628c56d45425394ed3cc6e192b26d5347f5bcf8df560c932be1",
+      "hunks": [
+        {
+          "before": "                                     (uint32_t)millis());\n    P4_CAN_DIAG_SERVICE(p4CanBusB());\n    canTwaiHandleAlerts();\n    twai_message_t f;\n    uint8_t rxBudget = 0;\n    canTaskDiagnosticsEnterStagePure(canTaskTwaiDiagnostics,\n                                     CAN_TASK_STAGE_RECEIVE,\n",
+          "after": "                                     (uint32_t)millis());\n    P4_CAN_DIAG_SERVICE(p4CanBusB());\n    canTwaiHandleAlerts();\n    twai_message_t f = {};\n    uint8_t rxBudget = 0;\n    canTaskDiagnosticsEnterStagePure(canTaskTwaiDiagnostics,\n                                     CAN_TASK_STAGE_RECEIVE,\n"
+        }
+      ]
+    }
+  }
+}

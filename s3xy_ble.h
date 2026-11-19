@@ -1,4 +1,5 @@
 #pragma once
+#include "can_error_diag_macros.h"
 #include "p4_ble_security.h"
 #include "p4_ble_crypto.h"
 #include "text_format_arduino.h"
@@ -102,7 +103,11 @@ enum S3xyAction : uint8_t {
   S3XY_ACTION_AUTO_BLINKER_TOGGLE = 9,
   S3XY_ACTION_PERFORMANCE_MODE = 10,
   S3XY_ACTION_LEFT_BLINKER = 11,
-  S3XY_ACTION_RIGHT_BLINKER = 12
+  S3XY_ACTION_RIGHT_BLINKER = 12,
+  S3XY_ACTION_BATTERY_PREHEAT = 13,
+  S3XY_ACTION_FSD_VISUALISATION = 14,
+  S3XY_ACTION_AP_RIGHT_LANE_CHANGE = 15,
+  S3XY_ACTION_AP_LEFT_LANE_CHANGE = 16
 };
 
 enum S3xyCommandType : uint8_t {
@@ -253,8 +258,12 @@ static volatile uint32_t s3xyResearchCaptureDPending = 0;
 static volatile uint32_t s3xyResearchCaptureResetPending = 0;
 static volatile uint32_t s3xyTlsscActionPending = 0;
 static volatile uint32_t s3xyAutoBlinkerActionPending = 0;
+static volatile uint32_t s3xyFsdActionPending = 0;
 static volatile uint32_t s3xyLeftBlinkerActionPending = 0;
+static volatile uint32_t s3xyApLeftActionPending = 0;
 static volatile uint32_t s3xyRightBlinkerActionPending = 0;
+static volatile uint32_t s3xyApRightActionPending = 0;
+static volatile uint32_t s3xyPreheatActionPending = 0;
 
 enum S3xyPendingClearScope : uint8_t {
   S3XY_PENDING_CAN_RECOVERY,
@@ -273,9 +282,13 @@ static void s3xyClearPendingActionsLocked(S3xyPendingClearScope scope) {
   s3xyResearchCaptureResetPending = 0;
   s3xyTlsscActionPending = 0;
   s3xyAutoBlinkerActionPending = 0;
+  s3xyFsdActionPending = 0;
+  s3xyPreheatActionPending = 0;
   if (scope == S3XY_PENDING_ALL) {
     s3xyLeftBlinkerActionPending = 0;
+    s3xyApLeftActionPending = 0;
     s3xyRightBlinkerActionPending = 0;
+    s3xyApRightActionPending = 0;
   }
 }
 
@@ -350,7 +363,11 @@ static const char *s3xyActionCode(uint8_t action) {
   if (action == S3XY_ACTION_TLSSC_TOGGLE) return "tlssc_toggle";
   if (action == S3XY_ACTION_AUTO_BLINKER_TOGGLE) return "auto_blinker_toggle";
   if (action == S3XY_ACTION_LEFT_BLINKER) return "left_blinker";
+  if (action == S3XY_ACTION_AP_LEFT_LANE_CHANGE) return "ap_left_lane_change";
   if (action == S3XY_ACTION_RIGHT_BLINKER) return "right_blinker";
+  if (action == S3XY_ACTION_AP_RIGHT_LANE_CHANGE) return "ap_right_lane_change";
+  if (action == S3XY_ACTION_FSD_VISUALISATION) return "fsd_visualisation";
+  if (action == S3XY_ACTION_BATTERY_PREHEAT) return "battery_preheat";
   return "none";
 }
 
@@ -366,20 +383,29 @@ static const char *s3xyActionLabel(uint8_t action) {
   if (action == S3XY_ACTION_TLSSC_TOGGLE) return "TLSSC Toggle";
   if (action == S3XY_ACTION_AUTO_BLINKER_TOGGLE) return "Auto Blinker Toggle";
   if (action == S3XY_ACTION_LEFT_BLINKER) return "Left Blinker";
+  if (action == S3XY_ACTION_AP_LEFT_LANE_CHANGE) return "AP Left Lane Change";
   if (action == S3XY_ACTION_RIGHT_BLINKER) return "Right Blinker";
+  if (action == S3XY_ACTION_AP_RIGHT_LANE_CHANGE) return "AP Right Lane Change";
+  if (action == S3XY_ACTION_FSD_VISUALISATION) return "FSD Visualisation";
+  if (action == S3XY_ACTION_BATTERY_PREHEAT) return "Battery Preheating";
   return "None";
 }
 
 static bool s3xyActionSupportedForCurrentProfile(uint8_t action) {
+  if (action == S3XY_ACTION_AP_RIGHT_LANE_CHANGE || action == S3XY_ACTION_AP_LEFT_LANE_CHANGE) return activeTurnSignalVariant == TURN_SIGNAL_STALK;
   if (action == S3XY_ACTION_ACCEL_MODE_TOGGLE) return activeProfilePedalMapSupported();
   if (action == S3XY_ACTION_PERFORMANCE_MODE) return activeProfilePedalMapSupported();
   if (action == S3XY_ACTION_AUTO_BLINKER_TOGGLE) return activeProfileAdvancedEapSupported();
   if (action == S3XY_ACTION_LEFT_BLINKER || action == S3XY_ACTION_RIGHT_BLINKER)
     return activeTurnSignalVariant != TURN_SIGNAL_UNSET;
+  if (action == S3XY_ACTION_BATTERY_PREHEAT) return activeProfilePreheatSupported() && !canMaintenanceActive();
   return true;
 }
 
 static bool s3xyActionParseKnown(const String &s, uint8_t &out) {
+  if (s == "ap_left_lane_change" || s == "AP Left Lane Change") { out = S3XY_ACTION_AP_LEFT_LANE_CHANGE; return true; }
+  if (s == "ap_right_lane_change" || s == "AP Right Lane Change") { out = S3XY_ACTION_AP_RIGHT_LANE_CHANGE; return true; }
+  if (s == "fsd_visualisation" || s == "FSD Visualisation") { out = S3XY_ACTION_FSD_VISUALISATION; return true; }
   if (s == "none" || s == "None") { out = S3XY_ACTION_NONE; return true; }
   if (s == "noa_cancel" || s == "NOA Lane Change Cancel") { out = S3XY_ACTION_NOA_CANCEL; return true; }
   if (s == "accel_mode_toggle" || s == "Acceleration Mode Toggle") { out = S3XY_ACTION_ACCEL_MODE_TOGGLE; return true; }
@@ -393,6 +419,7 @@ static bool s3xyActionParseKnown(const String &s, uint8_t &out) {
   if (s == "auto_blinker_toggle" || s == "Auto Blinker Toggle") { out = S3XY_ACTION_AUTO_BLINKER_TOGGLE; return true; }
   if (s == "left_blinker" || s == "Left Blinker") { out = S3XY_ACTION_LEFT_BLINKER; return true; }
   if (s == "right_blinker" || s == "Right Blinker") { out = S3XY_ACTION_RIGHT_BLINKER; return true; }
+  if (s == "battery_preheat" || s == "Battery Preheating") { out = S3XY_ACTION_BATTERY_PREHEAT; return true; }
   return false;
 }
 
@@ -733,25 +760,25 @@ static void s3xyRegistrySaveSlot(uint8_t slot) {
   String ss = "s" + String(slot), sd = "d" + String(slot), sl = "l" + String(slot);
   String sc = "c" + String(slot);
   if (used && addr[0]) {
-    p.putString(sa.c_str(), addr);
-    p.putString(sn.c_str(), name);
+    P4_CAN_DIAG_NVS_WRITE(2, p.putString(sa.c_str(), addr));
+    P4_CAN_DIAG_NVS_WRITE(2, p.putString(sn.c_str(), name));
     if (peerIdLen) {
-      p.putBytes(sb.c_str(), peerId, peerIdLen);
-      p.remove(si.c_str());  // raw bN is canonical; retire the legacy hex-string duplicate
+      P4_CAN_DIAG_NVS_WRITE(2, p.putBytes(sb.c_str(), peerId, peerIdLen));
+      P4_CAN_DIAG_NVS_WRITE(2, p.remove(si.c_str()));  // raw bN is canonical; retire the legacy hex-string duplicate
     } else {
-      p.remove(sb.c_str());
-      if (idHex[0]) p.putString(si.c_str(), idHex); else p.remove(si.c_str());
+      P4_CAN_DIAG_NVS_WRITE(2, p.remove(sb.c_str()));
+      if (idHex[0]) P4_CAN_DIAG_NVS_WRITE(2, p.putString(si.c_str(), idHex)); else P4_CAN_DIAG_NVS_WRITE(2, p.remove(si.c_str()));
     }
-    p.putUChar(st.c_str(), addressType);
-    p.putBool(sv.c_str(), addressTypeKnown);
-    p.putUChar(ss.c_str(), singleAction);
-    p.putUChar(sd.c_str(), doubleAction);
-    p.putUChar(sl.c_str(), longAction);
-    p.putBool(sc.c_str(), autoConnect);
+    P4_CAN_DIAG_NVS_WRITE(2, p.putUChar(st.c_str(), addressType));
+    P4_CAN_DIAG_NVS_WRITE(2, p.putBool(sv.c_str(), addressTypeKnown));
+    P4_CAN_DIAG_NVS_WRITE(2, p.putUChar(ss.c_str(), singleAction));
+    P4_CAN_DIAG_NVS_WRITE(2, p.putUChar(sd.c_str(), doubleAction));
+    P4_CAN_DIAG_NVS_WRITE(2, p.putUChar(sl.c_str(), longAction));
+    P4_CAN_DIAG_NVS_WRITE(2, p.putBool(sc.c_str(), autoConnect));
   } else {
-    p.remove(sa.c_str()); p.remove(sn.c_str()); p.remove(si.c_str()); p.remove(sb.c_str());
-    p.remove(st.c_str()); p.remove(sv.c_str());
-    p.remove(ss.c_str()); p.remove(sd.c_str()); p.remove(sl.c_str()); p.remove(sc.c_str());
+    P4_CAN_DIAG_NVS_WRITE(2, p.remove(sa.c_str())); P4_CAN_DIAG_NVS_WRITE(2, p.remove(sn.c_str())); P4_CAN_DIAG_NVS_WRITE(2, p.remove(si.c_str())); P4_CAN_DIAG_NVS_WRITE(2, p.remove(sb.c_str()));
+    P4_CAN_DIAG_NVS_WRITE(2, p.remove(st.c_str())); P4_CAN_DIAG_NVS_WRITE(2, p.remove(sv.c_str()));
+    P4_CAN_DIAG_NVS_WRITE(2, p.remove(ss.c_str())); P4_CAN_DIAG_NVS_WRITE(2, p.remove(sd.c_str())); P4_CAN_DIAG_NVS_WRITE(2, p.remove(sl.c_str())); P4_CAN_DIAG_NVS_WRITE(2, p.remove(sc.c_str()));
   }
   p.end();
 
@@ -826,7 +853,7 @@ static bool s3xyFinalizeLegacyKeys() {
   // s3xy/addr is a legacy single-device target. s3xyAutoLoadConfig() runs
   // before this finalizer and migrates it into the registry when needed.
   if (p.begin("s3xy", false)) {
-    if (s3xyRegisteredCount() > 0) p.remove("addr");
+    if (s3xyRegisteredCount() > 0) P4_CAN_DIAG_NVS_WRITE(2, p.remove("addr"));
     p.end();
   } else {
     ok = false;
@@ -842,7 +869,7 @@ static bool s3xyFinalizeLegacyKeys() {
       if (rawLen == 0 || rawLen > S3XY_PEER_ID_MAX) continue;
       uint8_t raw[S3XY_PEER_ID_MAX] = {};
       const size_t got = p.getBytes(sb.c_str(), raw, sizeof(raw));
-      if (got == rawLen) p.remove(si.c_str());
+      if (got == rawLen) P4_CAN_DIAG_NVS_WRITE(2, p.remove(si.c_str()));
     }
     p.end();
   } else {
@@ -1019,7 +1046,7 @@ static void s3xyAutoLoadConfig() {
   // Forget of the last registry device would resurrect it on the next boot.
   if (oldAddr.length() && s3xyRegisteredCount() > 0) {
     Preferences cleanup;
-    if (cleanup.begin("s3xy", false)) { cleanup.remove("addr"); cleanup.end(); }
+    if (cleanup.begin("s3xy", false)) { P4_CAN_DIAG_NVS_WRITE(2, cleanup.remove("addr")); cleanup.end(); }
   }
 }
 
@@ -1027,7 +1054,7 @@ static void s3xyAutoSetEnabled(bool enabled, bool persist = true) {
   if (persist) {
     Preferences p;
     if (p.begin("s3xy", false)) {
-      p.putBool("auto", enabled);
+      P4_CAN_DIAG_NVS_WRITE(2, p.putBool("auto", enabled));
       p.end();
     }
   }
@@ -1050,7 +1077,7 @@ static void s3xyAutoSetEnabled(bool enabled, bool persist = true) {
 static bool s3xyBluetoothMasterPersist(bool enabled) {
   Preferences p;
   if (!p.begin("s3xy", false)) return false;
-  const size_t n = p.putBool("bt", enabled);
+  const size_t n = P4_CAN_DIAG_NVS_WRITE(2, p.putBool("bt", enabled));
   p.end();
   if (n == 0) return false;
   portENTER_CRITICAL(&s3xyMux);
@@ -1218,8 +1245,12 @@ static void s3xyRunMappedAction(uint8_t slot, uint8_t action, const char *gestur
   else if (action == S3XY_ACTION_RESEARCH_CAPTURE_RESET) s3xyResearchCaptureResetPending++;
   else if (action == S3XY_ACTION_TLSSC_TOGGLE) s3xyTlsscActionPending++;
   else if (action == S3XY_ACTION_AUTO_BLINKER_TOGGLE) s3xyAutoBlinkerActionPending++;
+  else if (action == S3XY_ACTION_AP_LEFT_LANE_CHANGE) s3xyApLeftActionPending++;
   else if (action == S3XY_ACTION_LEFT_BLINKER) s3xyLeftBlinkerActionPending++;
+  else if (action == S3XY_ACTION_AP_RIGHT_LANE_CHANGE) s3xyApRightActionPending++;
   else if (action == S3XY_ACTION_RIGHT_BLINKER) s3xyRightBlinkerActionPending++;
+  else if (action == S3XY_ACTION_FSD_VISUALISATION) s3xyFsdActionPending++;
+  else if (action == S3XY_ACTION_BATTERY_PREHEAT) s3xyPreheatActionPending++;
   portEXIT_CRITICAL(&s3xyMux);
 #if S3XY_DIAGNOSTICS_ENABLED
   String d = String(gesture ? gesture : "gesture") + " -> " + s3xyActionLabel(action);
@@ -2654,11 +2685,11 @@ static void s3xyResetAllBluetoothData() {
   const uint16_t removedBonds = s3xyRemoveAllLocalBonds();
 
   Preferences reg;
-  if (reg.begin("s3xyreg", false)) { reg.clear(); reg.end(); }
+  if (reg.begin("s3xyreg", false)) { P4_CAN_DIAG_NVS_WRITE(2, reg.clear()); reg.end(); }
   Preferences legacy;
   if (legacy.begin("s3xy", false)) {
     // Preserve bt + auto; only obsolete/saved-peer compatibility data is cache.
-    legacy.remove("addr");
+    P4_CAN_DIAG_NVS_WRITE(2, legacy.remove("addr"));
     legacy.end();
   }
 
@@ -3181,8 +3212,11 @@ static void s3xyMapperTask(void *arg) {
     }
 
     bool runAction = false, runAccel = false, runPerformance = false, runResearchCapture = false, runResearchReset = false;
-    bool runTlsscToggle = false, runAutoBlinkerToggle = false;
+    bool runTlsscToggle = false, runAutoBlinkerToggle = false, runFsdToggle=false;
+    bool runApRight = false;
+    bool runApLeft = false;
     bool runLeftBlinker = false, runRightBlinker = false;
+    bool runPreheatToggle = false;
     uint8_t researchCaptureLabelSlot = RESEARCH_CAPTURE_LABEL_NONE;
     portENTER_CRITICAL(&s3xyMux);
     if (s3xyActionPending > 0) { s3xyActionPending--; runAction = true; }
@@ -3202,16 +3236,24 @@ static void s3xyMapperTask(void *arg) {
     }
     if (s3xyTlsscActionPending > 0) { s3xyTlsscActionPending--; runTlsscToggle = true; }
     if (s3xyAutoBlinkerActionPending > 0) { s3xyAutoBlinkerActionPending--; runAutoBlinkerToggle = true; }
+    if (s3xyApLeftActionPending > 0) { s3xyApLeftActionPending--; runApLeft = true; }
     if (s3xyLeftBlinkerActionPending > 0) { s3xyLeftBlinkerActionPending--; runLeftBlinker = true; }
+    if (s3xyApRightActionPending > 0) { s3xyApRightActionPending--; runApRight = true; }
     if (s3xyRightBlinkerActionPending > 0) { s3xyRightBlinkerActionPending--; runRightBlinker = true; }
+    if(s3xyFsdActionPending>0){s3xyFsdActionPending--;runFsdToggle=true;}
+    if (s3xyPreheatActionPending > 0) { s3xyPreheatActionPending--; runPreheatToggle = true; }
     portEXIT_CRITICAL(&s3xyMux);
     if (runAction) handleS3xySingleAction();
     if (runAccel) requestPedalMapToggleFromButton();
     if (runPerformance) requestPedalMapPerformanceFromButton();
     if (runTlsscToggle) toggleTlsscEnabledFromButton();
     if (runAutoBlinkerToggle) toggleAutoBlinkerEnabledFromButton();
+    if(runFsdToggle){const bool ok=toggleFsdSettingsFromButton();s3xyLogPush(S3XY_LOG_INFO,ok?"FSD Visualisation toggled":"FSD Visualisation save failed or busy");}
+    if (runApRight && !requestApLaneChangeFromButton(2)) s3xyLogPush(S3XY_LOG_INFO, "AP Right Lane Change unavailable");
+    if (runApLeft && !requestApLaneChangeFromButton(1)) s3xyLogPush(S3XY_LOG_INFO, "AP Left Lane Change unavailable");
     if (runLeftBlinker && !requestTurnSignalPulseFromButton(1)) s3xyLogPush(S3XY_LOG_INFO, "Left Blinker unavailable");
     if (runRightBlinker && !requestTurnSignalPulseFromButton(2)) s3xyLogPush(S3XY_LOG_INFO, "Right Blinker unavailable");
+    if (runPreheatToggle) togglePreheatEnabledFromButton();
     if (runResearchReset) {
       researchCaptureReset();
       s3xyLogPush(S3XY_LOG_INFO, "Research Capture Reset · DONE");

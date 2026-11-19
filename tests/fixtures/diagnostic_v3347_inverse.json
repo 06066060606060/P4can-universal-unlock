@@ -1,0 +1,60 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.34.6",
+  "files": {
+    "@sketch": {
+      "baseSha256": "1eca16f1843be199e2becab4100950fb93529c7e7378196ec04dbf76ce50e52b",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.34.6 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.34.7 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.6\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.7\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        }
+      ]
+    },
+    "p4_twai_driver.c": {
+      "baseSha256": "9cdd75306ba889a4b7142869af8fe56786a6e6e4f349edfa67c603c8d68e36b0",
+      "hunks": [
+        {
+          "before": "    p4_twai_priority_guard_t guard;\n    P4TwaiTxIdentity request;\n    uint32_t requestSequence;\n    bool handoffWaiting;\n    uint64_t handoffStartedUs;\n    uint32_t rxBoundary; // Captured at periodic admission, never refreshed in-place.\n} p4_twai_priority_slot_t;\nstatic DRAM_ATTR p4_twai_priority_slot_t s_p4_priority[SOC_TWAI_CONTROLLER_NUM];\n",
+          "after": "    p4_twai_priority_guard_t guard;\n    P4TwaiTxIdentity request;\n    uint32_t requestSequence;\n    uint32_t rxBoundary; // Captured at periodic admission, never refreshed in-place.\n} p4_twai_priority_slot_t;\nstatic DRAM_ATTR p4_twai_priority_slot_t s_p4_priority[SOC_TWAI_CONTROLLER_NUM];\n"
+        },
+        {
+          "before": "        if (reason != P4_TWAI_TX_REASON_NONE) p4_twai_priority_clear(obj, reason);\n    }\n    return slot->pending;\n}\n\n// Never discard an authorized pending response merely because raw RX arrived.\n// Give the single RX owner at most 1ms to compose its newer replacement. A\n// protected one-shot bypasses handoff; active hardware traffic is untouched.\nstatic bool p4_twai_immediate_newer_queued(twai_obj_t *obj,\n                                           const p4_twai_priority_guard_t *guard)\n{\n    const p4_twai_rx_boundary_t *rx = &s_p4_rx_boundary[obj->controller_id];\n    return guard->source == P4_TWAI_TX_SOURCE_R79_IMMEDIATE &&\n           !guard->preserve_pending && guard->rx_sequence != 0 &&\n           rx->latestQueuedMux1 != 0 && rx->latestQueuedMux1 != guard->rx_sequence &&\n           rx->completedMux1 != rx->latestQueuedMux1;\n}\n\nstatic bool p4_twai_immediate_handoff_wait(twai_obj_t *obj)\n{\n    p4_twai_priority_slot_t *slot = &s_p4_priority[obj->controller_id];\n    if (!p4_twai_immediate_newer_queued(obj, &slot->guard)) return false;\n    const uint64_t now = (uint64_t)esp_timer_get_time();\n    if (!slot->handoffWaiting) {\n        slot->handoffWaiting = true;\n        slot->handoffStartedUs = now;\n    }\n    return now - slot->handoffStartedUs < 1000u;\n}\n\n/* -------------------- Sleep Retention ------------------------ */\n",
+          "after": "        if (reason != P4_TWAI_TX_REASON_NONE) p4_twai_priority_clear(obj, reason);\n    }\n    return slot->pending;\n}\n\n/* -------------------- Sleep Retention ------------------------ */\n"
+        },
+        {
+          "before": "            // Retain the request and FIFO until RX or the task-side kick retries.\n            if (slot->guard.source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n                twai_hal_get_rx_msg_count(p_twai_obj->hal) != 0) return;\n            if (p4_twai_immediate_handoff_wait(p_twai_obj)) return;\n            twai_hal_frame_t frame = slot->frame;\n            const uint8_t source = p4_twai_r79_source(&slot->guard);\n            const P4TwaiTxIdentity request = slot->request;\n",
+          "after": "            // Retain the request and FIFO until RX or the task-side kick retries.\n            if (slot->guard.source == P4_TWAI_TX_SOURCE_R79_PERIODIC &&\n                twai_hal_get_rx_msg_count(p_twai_obj->hal) != 0) return;\n            twai_hal_frame_t frame = slot->frame;\n            const uint8_t source = p4_twai_r79_source(&slot->guard);\n            const P4TwaiTxIdentity request = slot->request;\n"
+        },
+        {
+          "before": "            p4TwaiDiagTxCancelled(p_twai_obj->controller_id, &slot->request, P4_TWAI_TX_REASON_REPLACED);\n            slot->frame = tx_frame;\n            slot->guard = *guard;\n            slot->handoffWaiting = false;\n            slot->request = p4_twai_new_request(p_twai_obj, &tx_frame, guard);\n            ret = ESP_OK;\n        } else {\n",
+          "after": "            p4TwaiDiagTxCancelled(p_twai_obj->controller_id, &slot->request, P4_TWAI_TX_REASON_REPLACED);\n            slot->frame = tx_frame;\n            slot->guard = *guard;\n            slot->request = p4_twai_new_request(p_twai_obj, &tx_frame, guard);\n            ret = ESP_OK;\n        } else {\n"
+        },
+        {
+          "before": "                   twai_hal_get_rx_msg_count(p_twai_obj->hal) != 0) {\n            p4TwaiDiagTxCancelled(p_twai_obj->controller_id, &request, P4_TWAI_TX_REASON_RX_PENDING);\n            ret = ESP_ERR_TIMEOUT;\n        } else if (p4_twai_immediate_newer_queued(p_twai_obj, guard)) {\n            p4_twai_priority_slot_t *slot = &s_p4_priority[p_twai_obj->controller_id];\n            slot->frame = tx_frame; slot->guard = *guard; slot->request = request;\n            slot->pending = true; slot->handoffWaiting = false;\n            p_twai_obj->tx_msg_count++;\n            ret = ESP_OK;\n        } else {\n            p4_twai_load(p_twai_obj, &tx_frame, p4_twai_r79_source(guard), &request);\n            p_twai_obj->tx_msg_count++;\n",
+          "after": "                   twai_hal_get_rx_msg_count(p_twai_obj->hal) != 0) {\n            p4TwaiDiagTxCancelled(p_twai_obj->controller_id, &request, P4_TWAI_TX_REASON_RX_PENDING);\n            ret = ESP_ERR_TIMEOUT;\n        } else {\n            p4_twai_load(p_twai_obj, &tx_frame, p4_twai_r79_source(guard), &request);\n            p_twai_obj->tx_msg_count++;\n"
+        }
+      ]
+    },
+    "vehicle_logic.h": {
+      "baseSha256": "3bd3c2641f561c242c1e3f7adfaeb4bcb6b11f54e9fafb005ac08768349b8d9d",
+      "hunks": [
+        {
+          "before": "    const uint32_t *retryAuthorityGeneration = nullptr) {\n  const uint32_t startedMs = (uint32_t)millis();\n  esp_err_t err;\n  do {\n    err = r79LabDirectTwaiTransmitOnce(msg, 0u, generation, expectedGeneration, apGeneration, hardDeadline, requireRetryEligibility, retryAuthorityGeneration);\n    if (err != ESP_ERR_TIMEOUT || waitMs == 0u ||\n        (uint32_t)((uint32_t)millis() - startedMs) >= waitMs) return err;\n    vTaskDelay(1);\n  } while ((uint32_t)((uint32_t)millis() - startedMs) < waitMs);\n  return err;\n",
+          "after": "    const uint32_t *retryAuthorityGeneration = nullptr) {\n  const uint32_t startedMs = (uint32_t)millis();\n  esp_err_t err;\n  const bool immediateRetry = requireRetryEligibility &&\n      generation == &r79ApGateGeneration;\n  do {\n    // Let the single RX owner compose a newer queued MUX1 instead of spending\n    // the old recovery budget ahead of it, including arrivals during a wait.\n    if (immediateRetry && !p4CanR79InputCurrent()) return ESP_ERR_TIMEOUT;\n    err = r79LabDirectTwaiTransmitOnce(msg, 0u, generation, expectedGeneration, apGeneration, hardDeadline, requireRetryEligibility, retryAuthorityGeneration);\n    if (err != ESP_ERR_TIMEOUT || waitMs == 0u ||\n        (uint32_t)((uint32_t)millis() - startedMs) >= waitMs) return err;\n    if (immediateRetry && !p4CanR79InputCurrent()) return ESP_ERR_TIMEOUT;\n    vTaskDelay(1);\n  } while ((uint32_t)((uint32_t)millis() - startedMs) < waitMs);\n  return err;\n"
+        },
+        {
+          "before": "    return;\n  }\n\n  if (originKind == R79LAB_TX_PERIODIC) {\n    if (!r79Mode1PostMux2GenerationCurrent(retryGeneration)) {\n      r79RetryCancel();\n",
+          "after": "    return;\n  }\n\n  // A deferred recovery remains due with the same retry index. Unrelated\n  // queued traffic does not defer it; only a newer successfully queued MUX1.\n  if (originKind == R79LAB_TX_IMMEDIATE && !p4CanR79InputCurrent()) return;\n\n  if (originKind == R79LAB_TX_PERIODIC) {\n    if (!r79Mode1PostMux2GenerationCurrent(retryGeneration)) {\n      r79RetryCancel();\n"
+        },
+        {
+          "before": "    r79RetryCancel();\n    return;\n  }\n\n  const uint8_t nextIndex = (uint8_t)(retryIndex + 1U);\n  const uint16_t nextDelayMs = r79RetryDelayMsPure(nextIndex);\n",
+          "after": "    r79RetryCancel();\n    return;\n  }\n\n  // A newer input may have arrived while admission was contended. Preserve\n  // the reservation rather than charging that yield as a failed recovery.\n  if (originKind == R79LAB_TX_IMMEDIATE && err == ESP_ERR_TIMEOUT &&\n      !p4CanR79InputCurrent()) return;\n\n  const uint8_t nextIndex = (uint8_t)(retryIndex + 1U);\n  const uint16_t nextDelayMs = r79RetryDelayMsPure(nextIndex);\n"
+        }
+      ]
+    }
+  }
+}

@@ -1,5 +1,6 @@
 """Verify the actual P4 ELF and map bind NimBLE to the package's fixed TinyCrypt."""
 import argparse
+import importlib.util
 import hashlib
 import json
 from pathlib import Path
@@ -89,13 +90,17 @@ def main():
         elf = args.elf.read_bytes()
         map_path = args.elf.with_suffix('.map')
         owners = verify_map(map_path.read_text(), elf_functions(elf))
+        spec = importlib.util.spec_from_file_location('p4_twai_gate', ROOT/'tools/verify_p4_twai.py')
+        twai_gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(twai_gate)
+        twai_report = twai_gate.verify_image(ROOT, args.elf)
     except (OSError, ValueError, KeyError, struct.error) as exc:
         raise SystemExit('P4 crypto link verification failed: ' + str(exc))
     print(json.dumps({'crypto_commit': '9fd7cb7e606a06111e1b14be7f4e00d77d9cf3dd',
                       'elf_sha256': hashlib.sha256(elf).hexdigest(),
                       'map_sha256': hashlib.sha256(map_path.read_bytes()).hexdigest(),
                       'native_nimble_fixed_tinycrypt': True, 'functions': owners,
-                      'upstream_source_sha256': sources}, indent=2))
+                      'upstream_source_sha256': sources, 'twai_error_capture': twai_report}, indent=2))
 
 if __name__ == '__main__':
     main()

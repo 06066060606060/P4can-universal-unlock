@@ -1,0 +1,9 @@
+{
+  "requestedVersion": "v3.29.1",
+  "verifiedOriginalFwVersion": "v3.29.1-P4-3TWAI-net2",
+  "referencePath": "firmware/universal/P4-CAN-Universal-v3.29.2/dashboard_source.html",
+  "originalDashboardSHA256": "1458fd4892b313e953032f6e6a3d611fb9af361798ef3eb4d65a678a966f584a",
+  "currentBase": "P4-CAN-Universal-v3.31.2",
+  "scope": "Restore Settings root and common existing feature control style/interaction to the verified original. Preserve current runtime/backend and explicitly retained feature additions/removals.",
+  "portableTestFixture": "tests/fixtures/settings_v3291_reference.html"
+}

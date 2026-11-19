@@ -1,0 +1,19 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.33.5",
+  "scope": "Build-only correction version identity; header-copy checker is independently covered.",
+  "files": {
+    "@sketch": {
+      "baseSha256": "e55feaf1cf2c62af4aea92fa862c81a48b23874a17565d496e26af3eda9fcea2",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.33.5 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.33.5.1 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.5\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.5.1\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        }
+      ]
+    }
+  }
+}

@@ -197,8 +197,11 @@ static inline uint8_t summonTxPriorityStatePure(
   return SUMMON_PRIORITY_NORMAL;
 }
 
+// Legacy name: this only authorizes bounded retry scheduling, never FIFO clears.
+// PARK_STANDBY is derived from fresh real P; final R79 permission still applies.
 static inline bool summonPriorityAllowsR79FlushPure(uint8_t state) {
-  return state == SUMMON_PRIORITY_READY || state == SUMMON_PRIORITY_ACTIVE;
+  return state == SUMMON_PRIORITY_PARK_STANDBY ||
+      state == SUMMON_PRIORITY_READY || state == SUMMON_PRIORITY_ACTIVE;
 }
 
 static inline bool summonPriorityNonR79AdmissionPure(

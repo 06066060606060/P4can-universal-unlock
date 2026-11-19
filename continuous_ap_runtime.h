@@ -1,4 +1,5 @@
 #pragma once
+#include "can_error_diag_macros.h"
 #include "continuous_ap_fsm_pure.h"
 static portMUX_TYPE continuousApMux=portMUX_INITIALIZER_UNLOCKED;
 static ContApConfig continuousApConfig;
@@ -150,20 +151,22 @@ static inline void continuousApService(ContApRoute route){
   portEXIT_CRITICAL(&continuousApMux);
 }
 
+// Serialized web settings owner; boot loading completes before CAN tasks start.
+// Keep NVS outside the TX barrier. Existing settings remain authoritative until
+// the successful save is published together with cancellation under the barrier.
 static inline bool continuousApControlApply(ContApConfig next){
   ContApConfig checked;
   if(!continuousApConfigDecodePure(continuousApConfigEncodePure(next),checked)||checked.enabled!=next.enabled||checked.method!=next.method)return false;
   if(next.enabled&&continuousApGestureRoutePure(activeVehicleProfile,activeVehicleTopology,next.method)==ContApRoute::None)return false;
-  if(!canTxBarrierMutex||xSemaphoreTake(canTxBarrierMutex,portMAX_DELAY)!=pdTRUE)return false;
+  if(!canTxBarrierMutex)return false;
   Preferences prefs;bool ok=prefs.begin("features",false);
-  if(ok){ok=prefs.putUInt("contApCfg",continuousApConfigEncodePure(next))==sizeof(uint32_t);prefs.end();}
-  if(ok){
-    portENTER_CRITICAL(&continuousApMux);
-    continuousApConfig=next;++continuousApGeneration;
-    continuousApFsm.cancel(continuousApGeneration,canTxBarrierState.epoch,(uint32_t)millis());
-    portEXIT_CRITICAL(&continuousApMux);
-  }
-  xSemaphoreGive(canTxBarrierMutex);return ok;
+  if(ok){ok=P4_CAN_DIAG_NVS_WRITE(7, prefs.putUInt("contApCfg",continuousApConfigEncodePure(next)))==sizeof(uint32_t);prefs.end();}
+  if(!ok||xSemaphoreTake(canTxBarrierMutex,portMAX_DELAY)!=pdTRUE)return false;
+  portENTER_CRITICAL(&continuousApMux);
+  continuousApConfig=next;++continuousApGeneration;
+  continuousApFsm.cancel(continuousApGeneration,canTxBarrierState.epoch,(uint32_t)millis());
+  portEXIT_CRITICAL(&continuousApMux);
+  xSemaphoreGive(canTxBarrierMutex);return true;
 }
 // Called at boot before CAN tasks; the features namespace also owns factory reset.
 static inline void continuousApControlLoad(){

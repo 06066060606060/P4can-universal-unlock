@@ -1,0 +1,66 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.33.9",
+  "files": {
+    "p4_can.h": {
+      "baseSha256": "e6f6057c14cc2e63aa43425b050c787e4e769fade0ac9b154182be801c82c0c4",
+      "hunks": [
+        {
+          "before": "  return err;\n}\nstatic esp_err_t p4CanSendB(const twai_message_t *f, TickType_t wait = 0, uint8_t source = 0u,\n    const p4_twai_priority_guard_t *priority = nullptr) {\n  (void)source;\n  const uint8_t bus = p4CanBusB();\n  if (!f || f->data_length_code > 8 || f->identifier > (f->extd ? 0x1fffffffUL : 0x7ffUL)) {\n",
+          "after": "  return err;\n}\nstatic esp_err_t p4CanSendB(const twai_message_t *f, TickType_t wait = 0, uint8_t source = 0u,\n    const p4_twai_priority_guard_t *priority = nullptr, bool mux1ImmediateOnly = false) {\n  (void)source;\n  const uint8_t bus = p4CanBusB();\n  if (!f || f->data_length_code > 8 || f->identifier > (f->extd ? 0x1fffffffUL : 0x7ffUL)) {\n"
+        },
+        {
+          "before": "  const auto diagToken = P4_CAN_DIAG_TX_BEGIN(bus, f, source);\n  const esp_err_t err = priority\n      ? p4_twai_transmit_r79_v2(p4CanHandles[bus], f, priority)\n      : twai_transmit_v2(p4CanHandles[bus], f, wait);\n  P4_R79_TIMING_TX_END(timingToken, f, err, true);\n  P4_CAN_DIAG_TX_END(bus, diagToken, f, err, source);\n",
+          "after": "  const auto diagToken = P4_CAN_DIAG_TX_BEGIN(bus, f, source);\n  const esp_err_t err = priority\n      ? p4_twai_transmit_r79_v2(p4CanHandles[bus], f, priority)\n      : mux1ImmediateOnly ? p4_twai_transmit_mux1_now_v2(p4CanHandles[bus], f)\n      : twai_transmit_v2(p4CanHandles[bus], f, wait);\n  P4_R79_TIMING_TX_END(timingToken, f, err, true);\n  P4_CAN_DIAG_TX_END(bus, diagToken, f, err, source);\n"
+        },
+        {
+          "before": "static esp_err_t p4CanSendR79B(const twai_message_t *f, const p4_twai_priority_guard_t &guard) {\n  return p4CanSendB(f, 0u, 0u, &guard);\n}\n",
+          "after": "static esp_err_t p4CanSendR79B(const twai_message_t *f, const p4_twai_priority_guard_t &guard) {\n  return p4CanSendB(f, 0u, 0u, &guard);\n}\n\n// Stock-derived MUX1 overlays are valid only for immediate ordinary TX.\n// Busy admission leaves ULC pending for a fresh stock frame or R79 composition.\nstatic esp_err_t p4CanSendMux1B(const twai_message_t *f) {\n  return p4CanSendB(f, 0u, 0u, nullptr, true);\n}\n"
+        }
+      ]
+    },
+    "vehicle_logic.h": {
+      "baseSha256": "c61d5b56d85efe284bc6820b29363b9f4937f26c65530a28f93aed967e43799b",
+      "hunks": [
+        {
+          "before": "// This helper is only used for physical CAN B clones. Body never overlays CAN B.\n// The display-only/DMS/ULC stock clones use the ordinary epoch/freshness and\n// non-Summon admission rules. They never apply the R79 bit18/19/47 transform.\nstatic esp_err_t mux1DisplayTransmit(const twai_message_t *msg,\n                                     uint32_t expectedEpoch,\n                                     uint8_t requiredFreshMask,\n",
+          "after": "// This helper is only used for physical CAN B clones. Body never overlays CAN B.\n// The display-only/DMS/ULC stock clones use the ordinary epoch/freshness and\n// non-Summon admission rules. They never apply the R79 bit18/19/47 transform.\n// Admit only onto idle hardware: a queued stock clone can outlive a later R79 TX.\nstatic esp_err_t mux1DisplayTransmit(const twai_message_t *msg,\n                                     uint32_t expectedEpoch,\n                                     uint8_t requiredFreshMask,\n"
+        },
+        {
+          "before": "            !displayGenerationValid ? p4_r79_timing::GENERATION_CHANGED :\n            !stockFresh ? p4_r79_timing::STOCK_TOO_OLD : p4_r79_timing::NO_OVERLAY_CHANGE, diagnosticReason)) {\n      timingDriverCalled = true;\n      err = p4CanSendB(&out, 0);\n      ulcSnoozeRecordFinal(ulcApplied, ulcRequestExpire, err);\n      canBTraceRecordTx(&out, err);\n\n",
+          "after": "            !displayGenerationValid ? p4_r79_timing::GENERATION_CHANGED :\n            !stockFresh ? p4_r79_timing::STOCK_TOO_OLD : p4_r79_timing::NO_OVERLAY_CHANGE, diagnosticReason)) {\n      timingDriverCalled = true;\n      err = p4CanSendMux1B(&out);\n      ulcSnoozeRecordFinal(ulcApplied, ulcRequestExpire, err);\n      canBTraceRecordTx(&out, err);\n\n"
+        }
+      ]
+    },
+    "p4_twai_driver.c": {
+      "baseSha256": "b0852b1ae09c9dd882fb3dc691683c714db5da2fc2e2199d79e32e45b149798d",
+      "hunks": [
+        {
+          "before": "    }\n}\n\nesp_err_t p4_twai_transmit_r79_v2(twai_handle_t handle, const twai_message_t *message,\n                               const p4_twai_priority_guard_t *guard)\n{\n",
+          "after": "    }\n}\n\n// State-derived ordinary MUX1 clones must never outlive their authorization in\n// the FIFO and follow a newer R79. This explicit route is atomic with native\n// R79 admission; generic ordinary traffic keeps the existing queue behavior.\nesp_err_t p4_twai_transmit_mux1_now_v2(twai_handle_t handle, const twai_message_t *message)\n{\n    TWAI_CHECK(handle != NULL && message != NULL, ESP_ERR_INVALID_ARG);\n    TWAI_CHECK(message->identifier == 0x3FD && !message->extd && !message->rtr &&\n               message->data_length_code == 8 && (message->data[0] & 0x07) == 1, ESP_ERR_INVALID_ARG);\n    twai_obj_t *p_twai_obj = handle;\n    twai_hal_frame_t tx_frame;\n    twai_frame_header_t header = {\n        .id = message->identifier,\n        .dlc = message->data_length_code,\n        .ide = message->extd,\n        .rtr = message->rtr,\n    };\n    twai_hal_trans_desc_t hal_trans = {\n        .frame = {\n            .header = &header,\n            .buffer = (uint8_t *)message->data,\n            .buffer_len = message->data_length_code,\n        },\n        .config.retry_cnt = message->ss ? 0 : -1,\n        .config.loopback = message->self,\n    };\n    twai_hal_format_frame(&hal_trans, &tx_frame);\n\n    portENTER_CRITICAL(&handle->spinlock);\n    esp_err_t ret;\n    if (p_twai_obj->mode == TWAI_MODE_LISTEN_ONLY) {\n        ret = ESP_ERR_NOT_SUPPORTED;\n    } else if (p_twai_obj->state != TWAI_STATE_RUNNING ||\n               twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_BUS_OFF)) {\n        ret = ESP_ERR_INVALID_STATE;\n    } else if (p4_twai_priority_pending(p_twai_obj) || p_twai_obj->tx_msg_count != 0 ||\n               twai_hal_check_state_flags(p_twai_obj->hal, TWAI_HAL_STATE_FLAG_TX_BUFF_OCCUPIED)) {\n        // Do not wait or consume the request: the producer must recompose from\n        // the next fresh stock frame, not retry an old payload after R79.\n        ret = ESP_ERR_TIMEOUT;\n    } else {\n        p4_twai_load(p_twai_obj, &tx_frame, P4_TWAI_TX_SOURCE_UNKNOWN, NULL);\n        p_twai_obj->tx_msg_count++;\n        ret = ESP_OK;\n    }\n    portEXIT_CRITICAL(&handle->spinlock);\n    return ret;\n}\n\nesp_err_t p4_twai_transmit_r79_v2(twai_handle_t handle, const twai_message_t *message,\n                               const p4_twai_priority_guard_t *guard)\n{\n"
+        }
+      ]
+    },
+    "@sketch": {
+      "baseSha256": "22b9fc4891c9d807802d4b1f457da9cdb5c0a468df170eaefb2ee9a16a3a4bd4",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.33.9 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.33.10 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.9\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.10\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        }
+      ]
+    },
+    "p4_twai_priority.h": {
+      "baseSha256": "475dc6ca4f468fd48867dbb2039d21278c6480114da51f2aae8a44c48c4502f1",
+      "hunks": [
+        {
+          "before": "    uint8_t source; // 2 immediate, 3 periodic; other values become R79_UNKNOWN.\n} p4_twai_priority_guard_t;\n\n// Zero-wait admission for standard 0x3FD/DLC8/MUX1 only. A pending request\n// cannot be replaced. ESP_OK means admitted, not transmitted on the wire.\nesp_err_t p4_twai_transmit_r79_v2(twai_handle_t handle,\n",
+          "after": "    uint8_t source; // 2 immediate, 3 periodic; other values become R79_UNKNOWN.\n} p4_twai_priority_guard_t;\n\n// Ordinary current-state clone: standard 0x3FD/DLC8/MUX1 only. Load directly\n// only when the native hardware and backlog are idle; otherwise return TIMEOUT.\n// Never queues, waits, clears other traffic, or grants R79 authority. Callers\n// retain one-shot requests on failure and recompose from fresh input.\nesp_err_t p4_twai_transmit_mux1_now_v2(twai_handle_t handle,\n                                    const twai_message_t *message);\n\n// Zero-wait admission for standard 0x3FD/DLC8/MUX1 only. A pending request\n// cannot be replaced. ESP_OK means admitted, not transmitted on the wire.\nesp_err_t p4_twai_transmit_r79_v2(twai_handle_t handle,\n"
+        }
+      ]
+    }
+  }
+}

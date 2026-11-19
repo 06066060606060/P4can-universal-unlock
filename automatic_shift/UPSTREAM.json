@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/kl79613/P4Can-automatic-shifting",
+  "commit": "c61c90dd40153b62271e524bcd354a75900e9749",
+  "core_files_unmodified": true,
+  "adaptations": "Application TX barrier, recovery invalidation, persistent config namespace, runtime scheduling and UI integration."
+}

@@ -1,4 +1,8 @@
+#include "r79_timing_web.h"
 #pragma once
+#include "can_error_diag_macros.h"
+#include <stdarg.h>
+#include <new>
 #include "text_format_arduino.h"
 
 // WEB API / OTA / DASHBOARD SERVICE
@@ -933,23 +937,20 @@ static String r79ApControlStatsToJson() {
 static String r79StatsToJson() {
   const uint32_t now = (uint32_t)millis();
   const R79RuntimeStatus runtime = r79RuntimeStatusSnapshot(now);
-  uint8_t bit18Policy, transportMode, mode1WaitMode, stockBit43, effectiveBit43;
-  bool stockValid, lastTxValid, dmsNagEnabled, mode1Reinject, mode2Reinject;
+  uint8_t bit18Policy, mode1WaitMode, stockBit43, effectiveBit43;
+  bool stockValid, lastTxValid, dmsNagEnabled, mode1Reinject;
   bool hw3Enabled;
   uint8_t stockBit47;
-  uint16_t mode1Delay, mode2Delay;
+  uint16_t mode1Delay;
   uint32_t bit43Rx0, bit43Rx1, bit43Changes;
   uint32_t rx, txOk, txFail, fastAttempts, fastOk, fastFail;
   uint32_t periodicOk, periodicFail, quietArm, quietFire, quietGuard;
   uint32_t dmsOnlyOk, dmsOnlyFail, dmsBlockedByR79;
   portENTER_CRITICAL(&r79LabMux);
   bit18Policy = r79Bit18Policy;
-  transportMode = r79ModeSanitizePure(r79TransportMode);
   mode1WaitMode = r79Mode1WaitModeSanitizePure(r79Mode1TxWaitMode);
   mode1Reinject = r79Mode1ReinjectEnabled;
   mode1Delay = r79FixedQuietDelaySanitizePure(r79Mode1DelayMs);
-  mode2Reinject = r79Mode2ReinjectEnabled;
-  mode2Delay = r79Mode2DelayMs;
   hw3Enabled = r79Hw3Enabled;
   stockBit47 = (r79LabLastStockRaw[5] >> 7) & 1u;
   stockValid = r79LabStockValid;
@@ -980,33 +981,23 @@ static String r79StatsToJson() {
   s.reserve(760);
   JsonWriterArduino jw(s);
   jw.boolean("fixedPolicy", true);
-  jw.u32("mode", transportMode);
-  jw.string("modeName", transportMode == R79_MODE_2_PURE ? "Mode 2" : "Mode 1");
-  jw.string("transport", transportMode == R79_MODE_2_PURE
-      ? "MUX1_FAST_ECHO_0MS"
-      : (mode1WaitMode == R79_MODE1_FAST_ECHO_PURE
-          ? "D9_MUX1_FAST_ECHO_0MS" : "D9_MUX1_2MS_WAIT"));
-  if (transportMode == R79_MODE_2_PURE) {
-    jw.string("periodic", mode2Reinject ? "OPTIONAL_MUX2_REINJECTION" : "OFF");
+  jw.u32("mode", 1u);
+  jw.string("modeName", "Mode 1");
+  jw.string("transport", mode1WaitMode == R79_MODE1_FAST_ECHO_PURE
+      ? "D9_MUX1_FAST_ECHO_0MS" : "D9_MUX1_2MS_WAIT");
+  if (mode1Reinject) {
+    String periodic = "MUX2_PLUS_";
+    periodic += (unsigned int)mode1Delay;
+    periodic += "MS_1X";
+    jw.string("periodic", periodic);
   } else {
-    if (mode1Reinject) {
-      String periodic = "MUX2_PLUS_";
-      periodic += (unsigned int)mode1Delay;
-      periodic += "MS_1X";
-      jw.string("periodic", periodic);
-    } else {
-      jw.string("periodic", "OFF");
-    }
+    jw.string("periodic", "OFF");
   }
   jw.u32("mode1TxWaitMode", mode1WaitMode);
   jw.boolean("mode1ReinjectEnabled", mode1Reinject);
   jw.u32("mode1DelayMs", mode1Delay);
-  jw.boolean("mode2ReinjectEnabled", mode2Reinject);
-  jw.u32("mode2DelayMs", mode2Delay);
-  jw.u32("bit18Mode", transportMode == R79_MODE_2_PURE
-      ? R79_BIT18_STOCK_PURE : bit18Policy);
-  jw.string("bit18ModeName", transportMode == R79_MODE_2_PURE
-      ? "STOCK" : (bit18Policy == R79_BIT18_STOCK_PURE ? "STOCK" : "FORCE_0"));
+  jw.u32("bit18Mode", bit18Policy);
+  jw.string("bit18ModeName", bit18Policy == R79_BIT18_STOCK_PURE ? "STOCK" : "FORCE_0");
   jw.u32("bit19", 0u);
   const bool hw3Supported = activeProfileR79Hw3Supported();
   const bool hw3Active = hw3Enabled && hw3Supported;
@@ -1062,9 +1053,9 @@ struct CanTrafficUiSnapshot {
 };
 
 static CanTrafficUiSnapshot canTrafficUiSnapshot() {
+  const uint32_t lastA = __atomic_load_n(&lastCanAFrameMs, __ATOMIC_RELAXED);
+  const uint32_t lastB = __atomic_load_n(&lastCanBFrameMs, __ATOMIC_RELAXED);
   const uint32_t now = (uint32_t)millis();
-  const uint32_t lastA = lastCanAFrameMs;
-  const uint32_t lastB = lastCanBFrameMs;
   CanTrafficUiSnapshot t = {};
   t.nativeASeen = lastA != 0;
   t.twaiSeen = lastB != 0;
@@ -1075,10 +1066,25 @@ static CanTrafficUiSnapshot canTrafficUiSnapshot() {
   return t;
 }
 
-static void p4CanWriteStatus(JsonWriterArduino &jw, bool details = false) {
+static void p4CanWriteStatus(JsonWriterArduino &jw, bool details = false, int selectedBus = -1,
+                             const char *view = nullptr) {
+  // Copy producer timestamps before sampling now. Serializing earlier fields
+  // may yield to RX/status producers; later reads could otherwise be in the
+  // future relative to now and wrap a fresh age into an apparent long outage.
+  uint32_t rxMs[P4_CAN_COUNT], statusMs[P4_CAN_COUNT];
+  for (uint8_t bus = 0; bus < P4_CAN_COUNT; ++bus) {
+    rxMs[bus] = __atomic_load_n(&p4CanLastRxMs[bus], __ATOMIC_RELAXED);
+    statusMs[bus] = __atomic_load_n(&p4CanStatusMs[bus], __ATOMIC_RELAXED);
+  }
   const uint32_t now = millis();
+  const bool full = !view || !view[0];
+  const bool status = full || strcmp(view, "status") == 0;
+  const bool traffic = full || strcmp(view, "traffic") == 0;
+  const bool errors = full || strcmp(view, "errors") == 0;
+  const bool recovery = full || strcmp(view, "recovery") == 0;
   jw.u32("canBusCount", 3);
   for (uint8_t bus = 0; bus < P4_CAN_COUNT; ++bus) {
+    if (selectedBus >= 0 && bus != selectedBus) continue;
     char key[40];
     const auto number = [&](const char *field, uint32_t value) {
       snprintf(key, sizeof(key), "can%u%s", bus + 1, field); jw.u32(key, value);
@@ -1086,35 +1092,71 @@ static void p4CanWriteStatus(JsonWriterArduino &jw, bool details = false) {
     const auto flag = [&](const char *field, bool value) {
       snprintf(key, sizeof(key), "can%u%s", bus + 1, field); jw.boolean(key, value);
     };
-    snprintf(key, sizeof(key), "can%uName", bus + 1); jw.string(key, p4CanNames[bus]);
-    const uint32_t last = p4CanLastRxMs[bus];
-    const uint32_t age = last ? now - last : 0;
-    number("TxPin", p4CanTxPins[bus]); number("RxPin", p4CanRxPins[bus]);
+    const auto text = [&](const char *field, const char *value) {
+      snprintf(key, sizeof(key), "can%u%s", bus + 1, field); jw.string(key, value);
+    };
+    text("Name", p4CanRoleName(bus));
     number("State", p4CanState[bus]);
-    number("RxCount", p4CanRxCount[bus]); number("TrafficAgeMs", age);
-    number("TxAccepted", p4CanTxAccepted[bus]); number("TxRejected", p4CanTxRejected[bus]);
-    number("BusOffCount", p4CanBusOffCount[bus]);
-    number("RxMissed", p4CanMissed[bus]); number("RxOverrun", p4CanOverrun[bus]);
+    flag("Ready", p4CanOnline[bus]);
     if (details) {
-      number("Controller", bus);
-      number("RxPolls", p4CanRxPolls[bus]);
-      number("Tec", p4CanTec[bus]); number("Rec", p4CanRec[bus]);
-      number("TxQueued", p4CanTxQueued[bus]); number("RxQueued", p4CanRxQueued[bus]);
-      number("BusErrors", p4CanBusErrors[bus]); number("ArbLost", p4CanArbLost[bus]);
-      number("DriverTxFailed", p4CanDriverTxFailed[bus]);
-      number("Recoveries", p4CanRecoveries[bus]); number("RecoveryFailures", p4CanRecoveryFailures[bus]);
-      const uint32_t statusMs = p4CanStatusMs[bus];
-      number("StatusAgeMs", statusMs ? now - statusMs : 0);
-      flag("StatusSeen", statusMs != 0);
-      snprintf(key, sizeof(key), "can%uInitResult", bus + 1);
-      jw.string(key, esp_err_to_name((esp_err_t)p4CanInitError[bus]));
-      snprintf(key, sizeof(key), "can%uRxResult", bus + 1);
-      jw.string(key, esp_err_to_name((esp_err_t)p4CanLastRxResult[bus]));
-      snprintf(key, sizeof(key), "can%uMode", bus + 1);
-      jw.string(key, p4CanPassive[bus] ? "LISTEN_ONLY" : "NORMAL");
+      number("StatusAgeMs", statusMs[bus] ? (uint32_t)(now - statusMs[bus]) : 0);
+      flag("StatusSeen", statusMs[bus] != 0);
     }
-    flag("Ready", p4CanOnline[bus]); flag("TrafficSeen", last != 0);
-    flag("TrafficOnline", last && age <= CAN_TRAFFIC_UI_FRESH_MS);
+    if (status) {
+      if (p4CanGpioValid) {
+        number("TxPin", p4CanTxPins[bus]); number("RxPin", p4CanRxPins[bus]);
+      } else {
+        snprintf(key, sizeof(key), "can%uTxPin", bus + 1); jw.raw(key, "null");
+        snprintf(key, sizeof(key), "can%uRxPin", bus + 1); jw.raw(key, "null");
+      }
+      if (details) {
+        number("Controller", bus);
+        const P4CanTimingConfiguration configured = p4CanConfiguredTiming(bus);
+        const twai_timing_config_t &timing = configured.timing;
+        const uint32_t totalQuanta = 1u + timing.tseg_1 + timing.tseg_2;
+        number("Bitrate", configured.bitrate);
+        number("SamplePointPermille", 1000u * (1u + timing.tseg_1) / totalQuanta);
+        number("TimingQuantaHz", timing.quanta_resolution_hz);
+        number("TimingTseg1", timing.tseg_1); number("TimingTseg2", timing.tseg_2);
+        number("TimingSjw", timing.sjw);
+        flag("TimingTripleSampling", timing.triple_sampling);
+        text("TimingSemantics", "configuration supplied to driver; not register readback or measured waveform; mode/init status determines operation");
+        text("InitResult", esp_err_to_name((esp_err_t)p4CanInitError[bus]));
+        text("Mode", p4CanPassive[bus] ? "LISTEN_ONLY" : "NORMAL");
+      }
+    }
+    if (traffic) {
+      const uint32_t last = rxMs[bus];
+      const uint32_t age = last ? now - last : 0;
+      number("RxCount", p4CanRxCount[bus]); number("TrafficAgeMs", age);
+      number("TxAccepted", p4CanTxAccepted[bus]); number("TxRejected", p4CanTxRejected[bus]);
+      flag("TrafficSeen", last != 0);
+      flag("TrafficOnline", last && age <= CAN_TRAFFIC_UI_FRESH_MS);
+      if (details) {
+        text("RxCounterLifetime", "BOOT"); text("AppCounterLifetime", "RESET_STATS");
+        text("DriverCounterLifetime", "DRIVER_INSTALL");
+        number("RxPolls", p4CanRxPolls[bus]);
+        number("TxQueued", p4CanTxQueued[bus]); number("RxQueued", p4CanRxQueued[bus]);
+        text("RxResult", esp_err_to_name((esp_err_t)p4CanLastRxResult[bus]));
+      }
+    }
+    if (errors) {
+      number("RxMissed", p4CanMissed[bus]); number("RxOverrun", p4CanOverrun[bus]);
+      if (details) {
+        if (!traffic) text("DriverCounterLifetime", "DRIVER_INSTALL");
+        flag("ErrorCountersFrozen", p4CanPassive[bus]);
+        number("Tec", p4CanTec[bus]); number("Rec", p4CanRec[bus]);
+        number("BusErrors", p4CanBusErrors[bus]); number("ArbLost", p4CanArbLost[bus]);
+        number("DriverTxFailed", p4CanDriverTxFailed[bus]);
+      }
+    }
+    if (recovery) {
+      number("BusOffCount", p4CanBusOffCount[bus]);
+      if (details) {
+        if (!traffic) text("AppCounterLifetime", "RESET_STATS");
+        number("Recoveries", p4CanRecoveries[bus]); number("RecoveryFailures", p4CanRecoveryFailures[bus]);
+      }
+    }
   }
 }
 
@@ -1141,19 +1183,80 @@ static String canTrafficStatsToJson() {
   return s;
 }
 
-static String systemStatsToJson() {
-  String s;
-  s.reserve(5200);
-  JsonWriterArduino jw(s);
-  p4CanWriteStatus(jw, true);
-  const uint32_t freeHeap = ESP.getFreeHeap();
-  const uint32_t minFreeHeap = ESP.getMinFreeHeap();
-  const uint32_t largestHeapBlock = ESP.getMaxAllocHeap();
-  const uint32_t stackCanA = canTaskNativeAHandle ? (uint32_t)uxTaskGetStackHighWaterMark(canTaskNativeAHandle) : 0;
-  const uint32_t stackCanB = canTaskTwaiHandle ? (uint32_t)uxTaskGetStackHighWaterMark(canTaskTwaiHandle) : 0;
-  const uint32_t stackCanSup = canSupervisorHandle ? (uint32_t)uxTaskGetStackHighWaterMark(canSupervisorHandle) : 0;
-  const uint32_t stackWeb = webTaskHandle ? (uint32_t)uxTaskGetStackHighWaterMark(webTaskHandle) : 0;
-  const uint32_t stackS3xy = s3xyTaskHandle ? (uint32_t)uxTaskGetStackHighWaterMark(s3xyTaskHandle) : 0;
+// Select only the visible diagnostic group before querying heaps, tasks or controllers.
+static bool systemStatsSectionValid(const char *section) {
+  if (!section || !section[0]) return true;
+  static const char *const sections[] = {"system", "memory", "wireless", "ble", "can1", "can2", "can3", "recovery"};
+  for (const char *candidate : sections) if (strcmp(section, candidate) == 0) return true;
+  return false;
+}
+
+static void systemMemoryWriteStatus(JsonWriterArduino &jw) {
+  jw.u32("freeHeap", ESP.getFreeHeap());
+  jw.u32("minFreeHeap", ESP.getMinFreeHeap());
+  jw.u32("largestHeapBlock", ESP.getMaxAllocHeap());
+  const uint32_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  const uint32_t psramCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+  jw.string("internalRamRegion", "P4 INTERNAL 8BIT");
+  jw.u32("internalRamTotalBytes", heap_caps_get_total_size(internalCaps));
+  jw.u32("internalRamFreeBytes", heap_caps_get_free_size(internalCaps));
+  jw.u32("internalRamMinFreeBytes", heap_caps_get_minimum_free_size(internalCaps));
+  jw.u32("internalRamLargestBlockBytes", heap_caps_get_largest_free_block(internalCaps));
+  jw.string("psramRegion", "P4 PSRAM");
+  jw.u32("psramTotalBytes", heap_caps_get_total_size(psramCaps));
+  jw.u32("psramFreeBytes", heap_caps_get_free_size(psramCaps));
+  jw.u32("psramMinFreeBytes", heap_caps_get_minimum_free_size(psramCaps));
+  jw.u32("psramLargestBlockBytes", heap_caps_get_largest_free_block(psramCaps));
+}
+
+static void systemCoreWriteStatus(JsonWriterArduino &jw) {
+  jw.string("fwVersion", FW_VERSION);
+  jw.string("chipModel", ESP.getChipModel());
+  jw.u32("cpuFreqMHz", ESP.getCpuFreqMHz());
+  jw.u32("cpuCores", ESP.getChipCores());
+  jw.u32("uptimeS", (uint32_t)((millis() - bootTime) / 1000));
+  if (canTaskNativeAHandle) jw.u32("stackCanA", (uint32_t)uxTaskGetStackHighWaterMark(canTaskNativeAHandle));
+  if (canTaskTwaiHandle) jw.u32("stackCanB", (uint32_t)uxTaskGetStackHighWaterMark(canTaskTwaiHandle));
+  if (canSupervisorHandle) jw.u32("stackCanSup", (uint32_t)uxTaskGetStackHighWaterMark(canSupervisorHandle));
+  if (webTaskHandle) jw.u32("stackWeb", (uint32_t)uxTaskGetStackHighWaterMark(webTaskHandle));
+  if (s3xyTaskHandle) jw.u32("stackS3xy", (uint32_t)uxTaskGetStackHighWaterMark(s3xyTaskHandle));
+  jw.boolean("otaInProgress", otaInProgress);
+  jw.boolean("otaSuccess", otaSuccess);
+  jw.boolean("otaError", otaError);
+  jw.string("otaErrMsg", otaErrMsg);
+  jw.string("otaStage", otaStage);
+  jw.u32("otaUpdateError", otaUpdateError);
+  jw.u32("otaAttempt", otaAttempt);
+  jw.u32("otaBytes", otaBytes);
+  jw.u32("otaTotal", otaTotal);
+}
+
+static void systemWirelessWriteStatus(JsonWriterArduino &jw) {
+  jw.string("networkState", p4NetworkPhaseName());
+  char hostedVersion[32];
+  if (p4NetworkHostVersion[0] || p4NetworkHostVersion[1] || p4NetworkHostVersion[2]) {
+    snprintf(hostedVersion, sizeof(hostedVersion), "%lu.%lu.%lu",
+        (unsigned long)p4NetworkHostVersion[0], (unsigned long)p4NetworkHostVersion[1],
+        (unsigned long)p4NetworkHostVersion[2]);
+    jw.string("hostedHostVersion", hostedVersion);
+  }
+  if (p4NetworkSlaveVersion[0] || p4NetworkSlaveVersion[1] || p4NetworkSlaveVersion[2]) {
+    snprintf(hostedVersion, sizeof(hostedVersion), "%lu.%lu.%lu",
+        (unsigned long)p4NetworkSlaveVersion[0], (unsigned long)p4NetworkSlaveVersion[1],
+        (unsigned long)p4NetworkSlaveVersion[2]);
+    jw.string("hostedC6Version", hostedVersion);
+  }
+  jw.boolean("hostedPinsReady", p4NetworkPinsReady);
+  jw.boolean("wifiStarted", p4NetworkWifiStarted);
+  jw.boolean("apStarted", p4NetworkApStarted);
+  jw.u32("wifiMode", (uint32_t)WiFi.getMode());
+  if (p4NetworkApStarted) {
+    jw.string("apIp", WiFi.softAPIP().toString());
+    jw.u32("apClients", (uint32_t)WiFi.softAPgetStationNum());
+  }
+}
+
+static void systemRecoveryWriteStatus(JsonWriterArduino &jw) {
   twai_status_info_t twaiNow = {};
   const bool twaiStatusOk = (p4CanReadBStatusForWeb(&twaiNow) == ESP_OK);
   CanTwaiRecoverySnapshot busOffSnap = {};
@@ -1193,28 +1296,6 @@ static String systemStatsToJson() {
       canBusOffPersistenceBoot[0] == CAN_BUS_OFF_BOOT_CURRENT;
   const bool canBRecordCurrent =
       canBusOffPersistenceBoot[1] == CAN_BUS_OFF_BOOT_CURRENT;
-  jw.string("fwVersion", FW_VERSION);
-  jw.string("networkState", p4NetworkPhaseName());
-  char hostedVersion[32];
-  snprintf(hostedVersion, sizeof(hostedVersion), "%lu.%lu.%lu",
-      (unsigned long)p4NetworkHostVersion[0], (unsigned long)p4NetworkHostVersion[1],
-      (unsigned long)p4NetworkHostVersion[2]);
-  jw.string("hostedHostVersion", hostedVersion);
-  snprintf(hostedVersion, sizeof(hostedVersion), "%lu.%lu.%lu",
-      (unsigned long)p4NetworkSlaveVersion[0], (unsigned long)p4NetworkSlaveVersion[1],
-      (unsigned long)p4NetworkSlaveVersion[2]);
-  jw.string("hostedC6Version", hostedVersion);
-  jw.u32("freeHeap", freeHeap);
-  jw.u32("minFreeHeap", minFreeHeap);
-  jw.u32("largestHeapBlock", largestHeapBlock);
-  jw.u32("stackCanA", stackCanA);
-  jw.u32("stackCanB", stackCanB);
-  jw.u32("stackCanSup", stackCanSup);
-  jw.u32("stackWeb", stackWeb);
-  jw.u32("stackS3xy", stackS3xy);
-  jw.boolean("s3xyDiagnosticsEnabled", S3XY_DIAGNOSTICS_ENABLED);
-  jw.u32("s3xyLogCapacity", (uint32_t)(S3XY_DIAGNOSTICS_ENABLED ? (unsigned)S3XY_LOG_MAX : 0U));
-  jw.u32("uptimeS", (uint32_t)((millis() - bootTime) / 1000));
   jw.boolean("nativeAReady", nativeAReady);
   jw.u32("nativeAState", (uint32_t)(nativeAState));
   jw.boolean("twaiReady", twaiReady);
@@ -1372,18 +1453,30 @@ static String systemStatsToJson() {
   jw.u32("twaiRxQueueNow", (uint32_t)(twaiRxQueueNow));
   jw.u32("twaiRxQueueMax", (uint32_t)(twaiRxQueueMax));
   jw.u32("twaiNonSummonShed", (uint32_t)(twaiNonSummonShed));
-  jw.boolean("otaInProgress", otaInProgress);
-  jw.boolean("otaSuccess", otaSuccess);
-  jw.boolean("otaError", otaError);
-  jw.string("otaErrMsg", otaErrMsg);
-  jw.string("otaStage", otaStage);
-  jw.u32("otaUpdateError", otaUpdateError);
-  jw.u32("otaAttempt", otaAttempt);
-  jw.u32("otaBytes", otaBytes);
-  jw.u32("otaTotal", otaTotal);
+}
+
+static String systemStatsToJson(const char *section, const char *view = nullptr) {
+  if (section && strcmp(section, "ble") == 0) return s3xyStatsToJson();
+  const bool full = !section || !section[0];
+  String s;
+  s.reserve(full ? 7000u : 1800u);
+  JsonWriterArduino jw(s);
+  if (full || strcmp(section, "system") == 0) systemCoreWriteStatus(jw);
+  if (full || strcmp(section, "memory") == 0) systemMemoryWriteStatus(jw);
+  if (full || strcmp(section, "wireless") == 0) systemWirelessWriteStatus(jw);
+  if (full) p4CanWriteStatus(jw, true);
+  else if (strncmp(section, "can", 3) == 0) p4CanWriteStatus(jw, true, section[3] - '1', view);
+  if (full || strcmp(section, "recovery") == 0) systemRecoveryWriteStatus(jw);
+  if (full) {
+    jw.boolean("s3xyDiagnosticsEnabled", S3XY_DIAGNOSTICS_ENABLED);
+    jw.u32("s3xyLogCapacity", (uint32_t)(S3XY_DIAGNOSTICS_ENABLED ? (unsigned)S3XY_LOG_MAX : 0U));
+    jw.raw("ble", s3xyStatsToJson());
+  }
   jw.finish();
   return s;
 }
+
+static String systemStatsToJson() { return systemStatsToJson(nullptr); }
 
 // ─── Boot timing capture export ─────────────────────────────
 
@@ -1482,6 +1575,462 @@ static void httpBootCaptureCsv() {
   server.send(200, "text/csv", bootCaptureToCsv());
 }
 
+// CAN error JSON export: fixed snapshot and complete bounded preparation precede
+// every success header. Serialization never reads the live journal or holds its
+// CAN lock, and one ordinary WebServer send owns transport/backpressure.
+// One bounded response String plus two heap snapshots; no per-event heap or
+// large task-stack buffer. Full maximal-width rings are covered by the host
+// export fixture, including RX-origin metadata on every native TX identity.
+// The 416KiB cap covers the maximal-width rings; allocation/append failure
+// returns 503 before HTTP headers.
+static constexpr size_t CAN_ERROR_JSON_MAX_BYTES = 416u * 1024u;
+static constexpr uint32_t CAN_ERROR_JSON_RING_CAPACITY = 32u;
+static_assert(CanDiag::BUS_COUNT == 3u && CanDiag::EVENT_CAPACITY == CAN_ERROR_JSON_RING_CAPACITY &&
+              CanDiag::FLASH_CAPACITY == CAN_ERROR_JSON_RING_CAPACITY,
+              "CAN error export must match the fixed physical journal layout");
+static_assert(P4_TWAI_DIAG_BUS_COUNT == 3u && P4_TWAI_DIAG_CAPACITY == 64u &&
+              P4_TWAI_TX_LIFECYCLE_CAPACITY == 32u && P4_TWAI_RX_WINDOW_CAPACITY == 4u &&
+              P4_TWAI_RX_PRE_CAPACITY == 16u && P4_TWAI_RX_POST_CAPACITY == 16u &&
+              CanDiag::REINIT_CAPACITY == 8u,
+              "CAN error export must match the fixed ISR error ring layout");
+
+template <typename SnapshotType>
+class CanDiagExportSnapshot {
+public:
+  SnapshotType *value;
+  CanDiagExportSnapshot() : value(nullptr) {
+    void *memory = heap_caps_malloc(sizeof(SnapshotType), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!memory) memory = heap_caps_malloc(sizeof(SnapshotType), MALLOC_CAP_8BIT);
+    if (memory) value = new (memory) SnapshotType{};
+  }
+  ~CanDiagExportSnapshot() {
+    if (value) { value->~SnapshotType(); heap_caps_free(value); }
+  }
+  CanDiagExportSnapshot(const CanDiagExportSnapshot &) = delete;
+  CanDiagExportSnapshot &operator=(const CanDiagExportSnapshot &) = delete;
+};
+
+static bool canDiagJsonAppend(String &json, const char *text, size_t bytes) {
+  if (!text || json.length() > CAN_ERROR_JSON_MAX_BYTES ||
+      bytes > CAN_ERROR_JSON_MAX_BYTES - json.length()) return false;
+  return json.concat(text, (unsigned int)bytes);
+}
+
+static bool canDiagJsonAppendf(String &json, const char *format, ...) {
+  char part[768];
+  va_list args;
+  va_start(args, format);
+  const int written = vsnprintf(part, sizeof(part), format, args);
+  va_end(args);
+  return written >= 0 && (size_t)written < sizeof(part) &&
+         canDiagJsonAppend(json, part, (size_t)written);
+}
+
+static bool canDiagJsonStatus(String &json, const CanDiag::Status &status) {
+  return canDiagJsonAppendf(json,
+    "{\"state\":%lu,\"tec\":%lu,\"rec\":%lu,\"txPending\":%lu,\"rxPending\":%lu,"
+    "\"txFailed\":%lu,\"missed\":%lu,\"overrun\":%lu,\"busErrors\":%lu,\"arbLost\":%lu}",
+    (unsigned long)status.state, (unsigned long)status.tec, (unsigned long)status.rec,
+    (unsigned long)status.txPending, (unsigned long)status.rxPending,
+    (unsigned long)status.txFailed, (unsigned long)status.missed,
+    (unsigned long)status.overrun, (unsigned long)status.busErrors, (unsigned long)status.arbLost);
+}
+
+static bool canDiagJsonTx(String &json, const CanDiag::Tx &tx) {
+  if (tx.dlc > 8u) return false;
+  static const char hex[] = "0123456789ABCDEF";
+  char data[17] = {};
+  for (uint8_t i = 0; i < tx.dlc; ++i) {
+    data[2u * i] = hex[tx.data[i] >> 4u];
+    data[2u * i + 1u] = hex[tx.data[i] & 15u];
+  }
+  return canDiagJsonAppendf(json,
+    "{\"valid\":%s,\"observedUs\":\"%llu\",\"id\":%lu,\"dlc\":%u,\"source\":%u,"
+    "\"called\":%s,\"callId\":%lu,\"resultPending\":%s,\"resultDelayUs\":%lu,\"result\":",
+    tx.valid ? "true" : "false", (unsigned long long)tx.observedUs,
+    (unsigned long)tx.id, (unsigned)tx.dlc, (unsigned)tx.source,
+    tx.called ? "true" : "false", (unsigned long)tx.callId,
+    tx.resultPending ? "true" : "false", (unsigned long)tx.resultDelayUs) &&
+    (tx.resultPending ? canDiagJsonAppendf(json, "null") : canDiagJsonAppendf(json, "%ld", (long)tx.result)) &&
+    canDiagJsonAppendf(json, ",\"dataHex\":\"%s\"}", data);
+}
+
+static bool canDiagJsonFlash(String &json, const CanDiag::FlashWindow &window) {
+  return canDiagJsonAppendf(json,
+    "{\"beginUs\":\"%llu\",\"endUs\":\"%llu\",\"seq\":%lu,\"activeCount\":%u,\"source\":%u,\"flags\":%u}",
+    (unsigned long long)window.beginUs, (unsigned long long)window.endUs,
+    (unsigned long)window.seq, (unsigned)window.activeCount,
+    (unsigned)window.source, (unsigned)window.flags);
+}
+
+static bool canDiagJsonEvent(String &json, const CanDiag::Event &event, uint8_t bus) {
+  if (event.bus != bus) return false;
+  return canDiagJsonAppendf(json,
+    "{\"observedUs\":\"%llu\",\"statusObservedUs\":\"%llu\",\"seq\":%lu,\"epoch\":%lu,"
+    "\"reasonMask\":%lu,\"alerts\":%lu,\"physicalBus\":%u,\"statusValid\":%s,\"status\":",
+    (unsigned long long)event.observedUs, (unsigned long long)event.statusObservedUs,
+    (unsigned long)event.seq, (unsigned long)event.epoch,
+    (unsigned long)event.reasonMask, (unsigned long)event.alerts,
+    (unsigned)event.bus, event.statusValid ? "true" : "false") &&
+    canDiagJsonStatus(json, event.status) && canDiagJsonAppendf(json, ",\"delta\":") &&
+    canDiagJsonStatus(json, event.delta) && canDiagJsonAppendf(json, ",\"tx\":") &&
+    canDiagJsonTx(json, event.tx) && canDiagJsonAppendf(json, ",\"flashCurrent\":") &&
+    canDiagJsonFlash(json, event.flashCurrent) && canDiagJsonAppendf(json, ",\"flashLast\":") &&
+    canDiagJsonFlash(json, event.flashLast) && canDiagJsonAppendf(json,
+      ",\"rxSeen\":%s,\"rxAgeUs\":%lu,\"serviceSeen\":%s,\"serviceGapUs\":%lu}",
+      event.rxSeen ? "true" : "false", (unsigned long)event.rxAgeUs,
+      event.serviceSeen ? "true" : "false", (unsigned long)event.serviceGapUs);
+}
+
+static bool canDiagJsonBus(String &json, const CanDiag::BusSnapshot &bus, uint8_t physicalBus) {
+  if (bus.count > CAN_ERROR_JSON_RING_CAPACITY) return false;
+  const char *name = p4CanRoleName(physicalBus);
+  if (!canDiagJsonAppendf(json,
+      "{\"physicalBus\":%u,\"canNumber\":%u,\"name\":\"%s\",\"capacity\":%lu,\"count\":%lu,"
+      "\"observed\":%lu,\"overwritten\":%lu,\"epoch\":%lu,\"hasStatus\":%s,"
+      "\"copiedAtUs\":\"%llu\",\"latestStatusUs\":\"%llu\",\"latestStatus\":",
+      (unsigned)physicalBus, (unsigned)physicalBus + 1u, name,
+      (unsigned long)CAN_ERROR_JSON_RING_CAPACITY, (unsigned long)bus.count,
+      (unsigned long)bus.observed, (unsigned long)bus.overwritten, (unsigned long)bus.epoch,
+      bus.hasStatus ? "true" : "false", (unsigned long long)bus.copiedAtUs,
+      (unsigned long long)bus.latestStatusUs) ||
+      !canDiagJsonStatus(json, bus.latestStatus) || !canDiagJsonAppendf(json, ",\"latestTx\":") ||
+      !canDiagJsonTx(json, bus.latestTx) || !canDiagJsonAppendf(json,
+      ",\"rxSeen\":%s,\"lastRxUs\":\"%llu\",\"serviceSeen\":%s,\"lastServiceUs\":\"%llu\","
+      "\"maxServiceGapUs\":%lu,\"unmatchedTxResults\":%lu,\"firstError\":",
+      bus.rxSeen ? "true" : "false", (unsigned long long)bus.lastRxUs,
+      bus.serviceSeen ? "true" : "false", (unsigned long long)bus.lastServiceUs,
+      (unsigned long)bus.maxServiceGapUs, (unsigned long)bus.unmatchedTxResults)) return false;
+  if (bus.hasFirstError ? !canDiagJsonEvent(json, bus.firstError, physicalBus) : !canDiagJsonAppendf(json, "null")) return false;
+  if (!canDiagJsonAppendf(json, ",\"latestError\":")) return false;
+  if (bus.hasLatestError ? !canDiagJsonEvent(json, bus.latestError, physicalBus) : !canDiagJsonAppendf(json, "null")) return false;
+  if (!canDiagJsonAppendf(json, ",\"firstBusOff\":")) return false;
+  if (bus.hasFirstBusOff ? !canDiagJsonEvent(json, bus.firstBusOff, physicalBus) : !canDiagJsonAppendf(json, "null")) return false;
+  if (!canDiagJsonAppendf(json, ",\"events\":[")) return false;
+  for (uint32_t i = 0; i < bus.count; ++i) {
+    if ((i && !canDiagJsonAppendf(json, ",")) || !canDiagJsonEvent(json, bus.events[i], physicalBus)) return false;
+  }
+  return canDiagJsonAppendf(json, "]}");
+}
+
+static bool canDiagJsonControllerTx(String &json, const P4TwaiTxIdentity &tx) {
+  if (tx.dlc > 8u || tx.flags > 3u || tx.valid > 1u || tx.active > 1u ||
+      (tx.active && !tx.valid)) return false;
+  static const char hex[] = "0123456789ABCDEF";
+  char data[17] = {};
+  for (uint8_t i = 0; i < tx.dlc; ++i) {
+    data[2u * i] = hex[tx.data[i] >> 4u];
+    data[2u * i + 1u] = hex[tx.data[i] & 15u];
+  }
+  if (!canDiagJsonAppendf(json,
+    "{\"valid\":%s,\"active\":%s,\"loadedUs\":\"%llu\",\"identifier\":%lu,"
+    "\"queuedUs\":\"%llu\",\"requestId\":%lu,\"dlc\":%u,\"source\":%u,\"flags\":%u,\"dataHex\":\"%s\"",
+    tx.valid ? "true" : "false", tx.active ? "true" : "false",
+    (unsigned long long)tx.loadedUs, (unsigned long)tx.identifier,
+    (unsigned long long)tx.queuedUs, (unsigned long)tx.requestId, (unsigned)tx.dlc, (unsigned)tx.source, (unsigned)tx.flags, data)) return false;
+  // Additive schema: absence means no originating RX identity was supplied.
+  // All origin values are exact decimal strings, including the sequence token.
+  if (tx.rxSequence && !canDiagJsonAppendf(json,
+      ",\"rxOrigin\":{\"sequence\":\"%lu\",\"observedUs\":\"%llu\",\"dequeuedUs\":\"%llu\"}",
+      (unsigned long)tx.rxSequence, (unsigned long long)tx.rxObservedUs,
+      (unsigned long long)tx.rxDequeuedUs)) return false;
+  return canDiagJsonAppendf(json, "}");
+}
+
+static bool canDiagJsonVehicleAge(String &json, bool valid, uint32_t observedMs,
+                                  uint32_t eventMs) {
+  return valid ? canDiagJsonAppendf(json, "%lu", (unsigned long)(uint32_t)(eventMs - observedMs)) :
+                 canDiagJsonAppendf(json, "null");
+}
+
+static bool canDiagJsonVehicle(String &json, const P4TwaiVehicleContext &vehicle,
+                               uint64_t eventUs) {
+  if (vehicle.gearValid > 1u || vehicle.apValid > 1u || vehicle.summonValid > 1u ||
+      vehicle.summonActive > 1u) return false;
+  const uint32_t eventMs = (uint32_t)(eventUs / 1000u);
+  return canDiagJsonAppendf(json,
+    "{\"publishedMs\":%lu,\"publicationAgeMs\":%lu,\"gearObservedMs\":%lu,"
+    "\"apObservedMs\":%lu,\"summonObservedMs\":%lu,\"gear\":%u,\"gearSource\":%u,"
+    "\"gearValid\":%s,\"apState\":%u,\"apValid\":%s,\"summonActive\":%s,\"summonValid\":%s,\"gearAgeMs\":",
+    (unsigned long)vehicle.publishedMs, (unsigned long)(uint32_t)(eventMs - vehicle.publishedMs),
+    (unsigned long)vehicle.gearObservedMs, (unsigned long)vehicle.apObservedMs,
+    (unsigned long)vehicle.summonObservedMs, (unsigned)vehicle.gear, (unsigned)vehicle.gearSource,
+    vehicle.gearValid ? "true" : "false", (unsigned)vehicle.apState,
+    vehicle.apValid ? "true" : "false", vehicle.summonActive ? "true" : "false",
+    vehicle.summonValid ? "true" : "false") &&
+    canDiagJsonVehicleAge(json, vehicle.gearValid, vehicle.gearObservedMs, eventMs) &&
+    canDiagJsonAppendf(json, ",\"apAgeMs\":") &&
+    canDiagJsonVehicleAge(json, vehicle.apValid, vehicle.apObservedMs, eventMs) &&
+    canDiagJsonAppendf(json, ",\"summonAgeMs\":") &&
+    canDiagJsonVehicleAge(json, vehicle.summonValid, vehicle.summonObservedMs, eventMs) &&
+    canDiagJsonAppendf(json, "}");
+}
+
+static bool canDiagJsonLifecycle(String &json, const P4TwaiTxLifecycleSnapshot &lifecycle) {
+  if (lifecycle.count > P4_TWAI_TX_LIFECYCLE_CAPACITY) return false;
+  if (!canDiagJsonAppendf(json,
+      "{\"capacity\":%u,\"count\":%lu,\"observed\":%lu,\"overwritten\":%lu,\"events\":[",
+      (unsigned)P4_TWAI_TX_LIFECYCLE_CAPACITY, (unsigned long)lifecycle.count,
+      (unsigned long)lifecycle.observed, (unsigned long)lifecycle.overwritten)) return false;
+  for (uint32_t i = 0; i < lifecycle.count; ++i) {
+    const P4TwaiTxLifecycleEvent &event = lifecycle.events[i];
+    if ((i && !canDiagJsonAppendf(json, ",")) || !canDiagJsonAppendf(json,
+        "{\"observedUs\":\"%llu\",\"seq\":%lu,\"kind\":%u,\"reason\":%u,\"tx\":",
+        (unsigned long long)event.observedUs, (unsigned long)event.seq,
+        (unsigned)event.kind, (unsigned)event.reason) ||
+        !canDiagJsonControllerTx(json, event.tx) || !canDiagJsonAppendf(json, ",\"vehicle\":") ||
+        !canDiagJsonVehicle(json, event.vehicle, event.observedUs) || !canDiagJsonAppendf(json, "}")) return false;
+  }
+  return canDiagJsonAppendf(json, "]}");
+}
+
+static bool canDiagJsonDriverEvent(String &json, const P4TwaiErrorEvent &event) {
+  const P4TwaiErrorDecoded decoded = p4TwaiDecodeError(event.ecc);
+  return canDiagJsonAppendf(json,
+    "{\"observedUs\":\"%llu\",\"seq\":%lu,\"ecc\":%lu,\"status\":%lu,\"tec\":%lu,\"rec\":%lu,"
+    "\"halFlags\":%lu,\"type\":%u,\"direction\":%u,\"segment\":%u,\"ackError\":%s,\"tx\":",
+    (unsigned long long)event.observedUs, (unsigned long)event.seq,
+    (unsigned long)event.ecc, (unsigned long)event.status, (unsigned long)event.tec,
+    (unsigned long)event.rec, (unsigned long)event.halFlags, (unsigned)decoded.type,
+    (unsigned)decoded.direction, (unsigned)decoded.segment, decoded.ackError ? "true" : "false") &&
+    canDiagJsonControllerTx(json, event.tx) && canDiagJsonAppendf(json, ",\"vehicle\":") &&
+    canDiagJsonVehicle(json, event.vehicle, event.observedUs) && canDiagJsonAppendf(json, "}");
+}
+
+static bool canDiagJsonDriverBus(String &json, const P4TwaiErrorBusSnapshot &bus, uint8_t physicalBus) {
+  if (bus.count > P4_TWAI_DIAG_CAPACITY) return false;
+  const char *name = p4CanRoleName(physicalBus);
+  const P4CanTimingConfiguration configured = p4CanConfiguredTiming(physicalBus);
+  const twai_timing_config_t &timing = configured.timing;
+  const uint32_t totalQuanta = 1u + timing.tseg_1 + timing.tseg_2;
+  if (!canDiagJsonAppendf(json,
+      "{\"physicalBus\":%u,\"canNumber\":%u,\"name\":\"%s\",\"capacity\":%u,\"count\":%lu,"
+      "\"observed\":%lu,\"overwritten\":%lu,\"copiedAtUs\":\"%llu\",\"configuredTiming\":{"
+      "\"bitrate\":%lu,\"samplePointPermille\":%lu,\"timingQuantaHz\":%lu,"
+      "\"timingTseg1\":%lu,\"timingTseg2\":%lu,\"timingSjw\":%lu,\"timingTripleSampling\":%s},\"first\":",
+      (unsigned)physicalBus, (unsigned)physicalBus + 1u, name, (unsigned)P4_TWAI_DIAG_CAPACITY,
+      (unsigned long)bus.count, (unsigned long)bus.observed, (unsigned long)bus.overwritten,
+      (unsigned long long)bus.copiedAtUs, (unsigned long)configured.bitrate,
+      (unsigned long)(1000u * (1u + timing.tseg_1) / totalQuanta),
+      (unsigned long)timing.quanta_resolution_hz, (unsigned long)timing.tseg_1,
+      (unsigned long)timing.tseg_2, (unsigned long)timing.sjw,
+      timing.triple_sampling ? "true" : "false")) return false;
+  if (bus.hasFirst ? !canDiagJsonDriverEvent(json, bus.first) : !canDiagJsonAppendf(json, "null")) return false;
+  if (!canDiagJsonAppendf(json, ",\"last\":")) return false;
+  if (bus.hasLast ? !canDiagJsonDriverEvent(json, bus.last) : !canDiagJsonAppendf(json, "null")) return false;
+  if (!canDiagJsonAppendf(json, ",\"events\":[")) return false;
+  for (uint32_t i = 0; i < bus.count; ++i) {
+    if ((i && !canDiagJsonAppendf(json, ",")) || !canDiagJsonDriverEvent(json, bus.events[i])) return false;
+  }
+  return canDiagJsonAppendf(json, "],\"r79Lifecycle\":") &&
+         canDiagJsonLifecycle(json, bus.lifecycle) && canDiagJsonAppendf(json, "}");
+}
+
+static bool canDiagJsonRxFrame(String &json, const P4TwaiRxFrame &frame) {
+  if (frame.dlc > 8u || (frame.flags & ~3u)) return false;
+  char data[17] = {};
+  // RTR carries a requested DLC, never a received payload.
+  if (!(frame.flags & 2u)) {
+    for (uint8_t i = 0; i < frame.dlc; ++i) snprintf(data + 2u * i, 3, "%02X", frame.data[i]);
+  }
+  return canDiagJsonAppendf(json,
+    "{\"observedUs\":\"%llu\",\"observationOrder\":\"%llu\",\"seq\":%lu,\"identifier\":%lu,\"dlc\":%u,\"flags\":%u,\"dataHex\":\"%s\"}",
+    (unsigned long long)frame.observedUs, (unsigned long long)frame.observationOrder,
+    (unsigned long)frame.seq, (unsigned long)frame.identifier, (unsigned)frame.dlc, (unsigned)frame.flags, data);
+}
+
+static bool canDiagJsonRxCapture(String &json, const P4TwaiRxCaptureSnapshot &capture) {
+  if (capture.enabled > 1u || capture.physicalBus != 1u || capture.count > P4_TWAI_RX_WINDOW_CAPACITY) return false;
+  if (!canDiagJsonAppendf(json,
+    "{\"version\":%u,\"enabled\":%s,\"physicalBus\":%u,\"controllerSession\":%lu,\"capacity\":%u,\"preCapacity\":%u,\"postCapacity\":%u,\"postTimeoutUs\":%u,"
+    "\"count\":%lu,\"observed\":%lu,\"overwritten\":%lu,\"rxObserved\":%lu,\"invalidDlc\":%lu,\"windows\":[",
+    (unsigned)P4_TWAI_RX_CAPTURE_VERSION, capture.enabled ? "true" : "false", (unsigned)capture.physicalBus,
+    (unsigned long)capture.controllerSession, (unsigned)P4_TWAI_RX_WINDOW_CAPACITY,
+    (unsigned)P4_TWAI_RX_PRE_CAPACITY, (unsigned)P4_TWAI_RX_POST_CAPACITY, (unsigned)P4_TWAI_RX_POST_TIMEOUT_US,
+    (unsigned long)capture.count, (unsigned long)capture.observed, (unsigned long)capture.overwritten,
+    (unsigned long)capture.rxObserved, (unsigned long)capture.invalidDlc)) return false;
+  for (uint32_t i = 0; i < capture.count; ++i) {
+    const P4TwaiRxWindow &window = capture.windows[i];
+    if (window.preCount > P4_TWAI_RX_PRE_CAPACITY || window.postCount > P4_TWAI_RX_POST_CAPACITY ||
+        window.status < P4_TWAI_RX_COLLECTING || window.status > P4_TWAI_RX_RECONFIGURED) return false;
+    if ((i && !canDiagJsonAppendf(json, ",")) || !canDiagJsonAppendf(json,
+      "{\"seq\":%lu,\"controllerSession\":%lu,\"firstErrorSeq\":%lu,\"lastErrorSeq\":%lu,\"errorCount\":%lu,"
+      "\"firstErrorUs\":\"%llu\",\"lastErrorUs\":\"%llu\",\"firstErrorOrder\":\"%llu\",\"lastErrorOrder\":\"%llu\","
+      "\"deadlineUs\":\"%llu\",\"closedUs\":\"%llu\",\"status\":%u,\"preCount\":%u,\"postCount\":%u,\"postPartial\":%s,\"pre\":[",
+      (unsigned long)window.seq, (unsigned long)window.controllerSession, (unsigned long)window.firstErrorSeq,
+      (unsigned long)window.lastErrorSeq, (unsigned long)window.errorCount,
+      (unsigned long long)window.firstErrorUs, (unsigned long long)window.lastErrorUs,
+      (unsigned long long)window.firstErrorOrder, (unsigned long long)window.lastErrorOrder,
+      (unsigned long long)window.deadlineUs, (unsigned long long)window.closedUs,
+      (unsigned)window.status, (unsigned)window.preCount, (unsigned)window.postCount,
+      window.postCount < P4_TWAI_RX_POST_CAPACITY ? "true" : "false")) return false;
+    for (uint8_t n = 0; n < window.preCount; ++n) {
+      if ((n && !canDiagJsonAppendf(json, ",")) || !canDiagJsonRxFrame(json, window.pre[n])) return false;
+    }
+    if (!canDiagJsonAppendf(json, "],\"post\":[")) return false;
+    for (uint8_t n = 0; n < window.postCount; ++n) {
+      if ((n && !canDiagJsonAppendf(json, ",")) || !canDiagJsonRxFrame(json, window.post[n])) return false;
+    }
+    if (!canDiagJsonAppendf(json, "]}")) return false;
+  }
+  return canDiagJsonAppendf(json, "]}");
+}
+
+static bool canDiagJsonReinitializations(String &json, const CanDiag::Snapshot &snapshot) {
+  if (snapshot.reinitCount > CanDiag::REINIT_CAPACITY) return false;
+  if (!canDiagJsonAppendf(json,
+    "{\"capacity\":%lu,\"count\":%lu,\"observed\":%lu,\"overwritten\":%lu,\"events\":[",
+    (unsigned long)CanDiag::REINIT_CAPACITY, (unsigned long)snapshot.reinitCount,
+    (unsigned long)snapshot.reinitObserved, (unsigned long)snapshot.reinitOverwritten)) return false;
+  for (uint32_t i = 0; i < snapshot.reinitCount; ++i) {
+    const CanDiag::ReinitEvent &event = snapshot.reinitEvents[i];
+    if ((event.statusValidMask & ~7u) || event.phase < 1u || event.phase > 3u) return false;
+    if ((i && !canDiagJsonAppendf(json, ",")) || !canDiagJsonAppendf(json,
+      "{\"observedUs\":\"%llu\",\"seq\":%lu,\"requestId\":%lu,\"reason\":%u,\"diagnosticReason\":%u,\"phase\":%u,\"statusValidMask\":%u,\"buses\":[",
+      (unsigned long long)event.observedUs, (unsigned long)event.seq, (unsigned long)event.requestId,
+      (unsigned)event.reason, (unsigned)event.diagnosticReason, (unsigned)event.phase, (unsigned)event.statusValidMask)) return false;
+    for (uint8_t bus = 0; bus < CanDiag::BUS_COUNT; ++bus) {
+      if (!canDiagJsonAppendf(json,
+        "%s{\"physicalBus\":%u,\"controllerEpoch\":%lu,\"busErrors\":%lu,\"statusObservedUs\":\"%llu\",\"statusValid\":%s}",
+        bus ? "," : "", (unsigned)bus, (unsigned long)event.controllerEpoch[bus], (unsigned long)event.busErrors[bus],
+        (unsigned long long)event.statusObservedUs[bus], event.statusValidMask & (1u << bus) ? "true" : "false")) return false;
+    }
+    if (!canDiagJsonAppendf(json, "]}")) return false;
+  }
+  return canDiagJsonAppendf(json, "]}");
+}
+
+static bool canDiagJsonDriverCapture(String &json, const P4TwaiErrorSnapshot &snapshot) {
+  if (!canDiagJsonAppendf(json,
+      "{\"bootId\":%lu,\"captureBeginUs\":\"%llu\",\"capturedUs\":\"%llu\",\"consistent\":true,\"invalidBus\":%lu,",
+      (unsigned long)snapshot.bootId, (unsigned long long)snapshot.captureBeginUs,
+      (unsigned long long)snapshot.capturedUs, (unsigned long)snapshot.invalidBus)) return false;
+  static const char metadata[] =
+      "\"contextVersion\":1,"
+      "\"capabilities\":{\"rawEcc\":true,\"type\":true,\"direction\":true,\"segment\":true,"
+      "\"failedRxIdentifier\":false,\"physicalCause\":false,\"wireTimestamps\":false,\"controllerLoadedTx\":true,\"vehicleContext\":true,\"r79Lifecycle\":true,\"bodyRxPrePost\":true},"
+      "\"semantics\":{\"capturePoint\":\"existing TWAI HAL error-capture read in the ISR; ecc preserves the full raw 32-bit register value\","
+      "\"snapshotConsistency\":\"same boot as the general journal; independently timed coherent bounded capture interval [captureBeginUs,capturedUs], per-bus copiedAtUs; not an atomic instant across sources\","
+      "\"timeSource\":\"ISR software observation in microseconds, not wire timestamps; uint64 values are decimal strings\","
+      "\"configuredTiming\":\"configuration supplied to driver; not register readback or measured waveform; mode/init status determines operation; samplePointPermille=1000*(1+TSEG1)/(1+TSEG1+TSEG2)\","
+      "\"halFlags\":\"raw HAL state_flags, not driver interrupt event bits\","
+      "\"interrupts\":\"error interrupts may be coalesced; one captured record is not guaranteed per wire error\","
+      "\"classification\":\"type/direction/segment are ECC bit fields; ACK error only for OTHER plus ACK_SLOT; CRC segment does not classify a CRC error; unknown codes retain raw evidence; no failed RX ID or physical cause guarantee\","
+      "\"journalLifetime\":\"RAM only, current boot; reboot clears evidence, Reset Stats retains it, export is read-only\","
+      "\"storedEvents\":\"error interrupts only; routine RX/TX/status events are not stored in this dedicated ring\","
+      "\"controllerTx\":\"tx is controller-loaded identity, not latest enqueue; loadedUs is software controller load, not wire start; active=false preserves historical identity and must not be treated as a failed TX ID; RX error identifier remains unknown; active TX beside RX ECC does not imply causation; ordinary source is UNKNOWN\","
+      "\"rxOrigin\":\"optional tx.rxOrigin only when RX sequence is nonzero; sequence, observedUs and dequeuedUs are exact decimal strings; sequence is a per-controller nonzero wrapping RX token; observedUs is native FIFO software observation, dequeuedUs is application receive dequeue, neither is a physical wire timestamp; queuedUs is admission, loadedUs is controller load, completed event observedUs is completion observation; retained across lifecycle and ECC contexts; absent for ordinary TX or origin unavailable\","
+      "\"vehicleContext\":\"latest task-published raw state copied at ECC/lifecycle observation, not simultaneous physical measurement; validity is diagnostic publication-time validity, not proof of current wire state; so inspect publication and signal ages for staleness; invalid signal ages are null; timestamps/ages are uint32 milliseconds with modulo-2^32 subtraction, ambiguous beyond one wrap; an all-zero unpublished context has all valid flags false\","
+      "\"r79Lifecycle\":\"separate bounded R79-only ring; queued/loaded/completed/cancelled record software observations; completed SUCCESS means controller TX completion, not ECU acceptance; requestId plus queuedUs links one R79 request across admission/load/cancel/completion and ECC TX context; requestId is per-controller nonzero wrapping token, ordinary token/time are zero; loadedUs is actual load observation; queued/cancelled-before-load have valid=false and loadedUs=0; overwritten discloses lost rows, no one-to-one lifecycle completeness guarantee\","
+      "\"rxCapture\":\"bounded successful RX frames around BODY errors on physical bus 1 when enabled for YL; pre/post means ISR software observation order relative to first error, not wire order or wire timestamps; FIFO backlog after ECC may have arrived before it; failed RX identifier and damaged payload remain unknown; repeated errors while collecting share a window with first/last error sequence and order; no causation claim\","
+      "\"rxWindowLifetime\":\"RAM only, retained across Reset Stats and controller reconfiguration; controllerSession separates installations and clears live prehistory; reconfiguration closes partial windows; postPartial means fewer than postCapacity observed frames; COLLECTING may be incomplete at export, EXPIRED reached deadline, RECONFIGURED ended early; overwritten counts lost oldest windows, not lost wire frames; uint64 observationOrder is software hook order, decimal string\","
+      "\"counters\":\"observed, overwritten and seq saturate at uint32 max; events remain oldest to newest\",\"autoPersistence\":false},"
+      "\"codebook\":{\"txSources\":{\"UNKNOWN\":0,\"R79_UNKNOWN\":1,\"R79_IMMEDIATE\":2,\"R79_PERIODIC\":3},"
+      "\"gearSources\":{\"NONE\":0,\"CAN_0x118\":1,\"CAN_0x186\":2},"
+      "\"rxWindowStatuses\":{\"COLLECTING\":1,\"COMPLETE\":2,\"EXPIRED\":3,\"RECONFIGURED\":4},"
+      "\"rxFlags\":{\"EXT\":1,\"RTR\":2},"
+      "\"txFlags\":{\"EXT\":1,\"RTR\":2},"
+      "\"lifecycleKinds\":{\"QUEUED\":1,\"LOADED\":2,\"COMPLETED\":3,\"CANCELLED\":4},"
+      "\"lifecycleReasons\":{\"NONE\":0,\"SUCCESS\":1,\"FAILED\":2,\"GENERATION\":3,\"CANCEL_GENERATION\":4,\"HOLD\":5,\"DEADLINE\":6,\"BUS_OFF\":7,\"STOP\":8,\"RECOVERY\":9,\"UNINSTALL\":10,\"QUEUE_CLEAR\":11,\"START\":12,\"REPLACED\":13,\"RX_BOUNDARY\":14,\"RX_PENDING\":15},"
+      "\"types\":{";
+  if (!canDiagJsonAppend(json, metadata, sizeof(metadata) - 1u)) return false;
+  for (uint8_t code = 0; code < 4u; ++code) {
+    if (!canDiagJsonAppendf(json, "%s\"%u\":\"%s\"", code ? "," : "", (unsigned)code,
+                           p4TwaiErrorTypeLabel(code))) return false;
+  }
+  if (!canDiagJsonAppendf(json, "},\"directions\":{")) return false;
+  for (uint8_t code = 0; code < 2u; ++code) {
+    if (!canDiagJsonAppendf(json, "%s\"%u\":\"%s\"", code ? "," : "", (unsigned)code,
+                           p4TwaiErrorDirectionLabel(code))) return false;
+  }
+  if (!canDiagJsonAppendf(json, "},\"segments\":{")) return false;
+  for (uint8_t code = 0; code < 32u; ++code) {
+    if (!canDiagJsonAppendf(json, "%s\"%u\":\"%s\"", code ? "," : "", (unsigned)code,
+                           p4TwaiErrorSegmentLabel(code))) return false;
+  }
+  if (!canDiagJsonAppendf(json, "}},\"buses\":[")) return false;
+  for (uint8_t bus = 0; bus < P4_TWAI_DIAG_BUS_COUNT; ++bus) {
+    if ((bus && !canDiagJsonAppendf(json, ",")) || !canDiagJsonDriverBus(json, snapshot.buses[bus], bus)) return false;
+  }
+  return canDiagJsonAppendf(json, "],\"rxCapture\":") &&
+         canDiagJsonRxCapture(json, snapshot.rxCapture) && canDiagJsonAppendf(json, "}");
+}
+
+static bool canDiagJsonSerialize(String &json, const CanDiag::Snapshot &snapshot,
+                                 const P4TwaiErrorSnapshot &driverSnapshot) {
+  if (!snapshot.consistent || !driverSnapshot.consistent || snapshot.bootId != driverSnapshot.bootId ||
+      snapshot.flashCount > CAN_ERROR_JSON_RING_CAPACITY ||
+      !json.reserve(CAN_ERROR_JSON_MAX_BYTES)) return false;
+  if (!canDiagJsonAppendf(json,
+      "{\"schemaVersion\":1,\"firmware\":\"%s\",\"bootId\":%lu,\"captureBeginUs\":\"%llu\",\"capturedUs\":\"%llu\",\"consistent\":true,",
+      FW_VERSION, (unsigned long)snapshot.bootId, (unsigned long long)snapshot.captureBeginUs,
+      (unsigned long long)snapshot.capturedUs)) return false;
+  static const char semantics[] =
+      "\"semantics\":{\"timestampUnit\":\"microseconds\",\"uint64Encoding\":\"decimal strings\","
+      "\"timeSource\":\"CPU software observation, not wire timestamps\",\"snapshotConsistency\":\"retained events structurally coherent over bounded capture interval [captureBeginUs,capturedUs]; live RX/TX/service context copied per bus at copiedAtUs, not an atomic instant\","
+      "\"txResult\":\"driver queue acceptance or rejection, not wire completion or ECU acceptance; result is null while resultPending\",\"txResultAttribution\":\"callId matches completion to submission; unmatchedTxResults counts results superseded by a newer TX observation\",\"txTiming\":\"observedUs is submission observation; resultDelayUs is result observation delay, saturated at uint32 max\",\"txIdEncoding\":\"low 29 bits identifier; bit31 extended, bit30 RTR\","
+      "\"alerts\":\"coalesced driver bits, not one alert per frame or ACK/CRC/Bit classification\","
+      "\"journalLifetime\":\"RAM only, current boot; cleared by reboot, retained across Reset Stats; export does not clear evidence\","
+      "\"counterLifetime\":\"driver install/reset epoch; epoch change establishes a fresh baseline\","
+      "\"serviceTiming\":\"task observations; SERVICE_GAP records gaps >=50000 us, including recovery and maintenance; correlation does not prove cause\","
+      "\"flashScope\":\"application-owned NVS operations only; SDK-internal BLE/flash is not observed\",\"autoPersistence\":false,\"ageEncoding\":\"uint32 microsecond ages saturate at 4294967295\",\"flashHistory\":\"completed aggregate windows; nested operations share an overlapped window\"},"
+      "\"reinitializationSemantics\":\"bounded hard-reinit BEGIN/SUCCESS/FAILED task observations in current boot; requestId joins attempt phases, missing phases may be overwritten; retained across Reset Stats; per-bus busErrors/controllerEpoch/statusObservedUs are cached diagnostics, not simultaneous hardware readback; invalid cached status is explicit in statusValidMask\","
+      "\"reinitializationCodebook\":{\"phases\":{\"BEGIN\":1,\"SUCCESS\":2,\"FAILED\":3},\"reasons\":{\"NONE\":0,\"ACQUIRE\":1,\"STALE\":2,\"MANUAL\":3},"
+      "\"diagnosticReasons\":{\"NONE\":0,\"TWAI_BUS_OFF\":1,\"TWAI_RECOVERY_FAIL\":2,\"TWAI_STOPPED\":3,\"TWAI_RESTART_FAIL\":4,\"ONE_BUS_STALE\":5,\"WAKE_ACQUIRE_TIMEOUT\":6,\"COLD_ACQUIRE_TIMEOUT\":7,\"TASK_HEARTBEAT_TIMEOUT\":8,\"MANUAL\":9,\"NATIVE_A_REINIT_FAIL\":10}},"
+      "\"controllerStates\":{\"STOPPED\":0,\"RUNNING\":1,\"BUS_OFF\":2,\"RECOVERING\":3},"
+      "\"flashFlags\":{\"VALID\":1,\"OVERLAPPED\":2},";
+  if (!canDiagJsonAppend(json, semantics, sizeof(semantics) - 1u) ||
+      !canDiagJsonAppendf(json,
+        "\"reasonBits\":{\"BASELINE\":%lu,\"PERIODIC\":%lu,\"STATUS_CHANGE\":%lu,\"COUNTER_CHANGE\":%lu,\"ALERT\":%lu,"
+        "\"COUNTER_RESET\":%lu,\"CONTROLLER_EPOCH\":%lu,\"RECOVERY_START\":%lu,\"RECOVERY_ACCEPTED\":%lu,"
+        "\"RECOVERY_FAILURE\":%lu,\"RECOVERY_RUNNING\":%lu,\"BUS_OFF_ALERT\":%lu,\"SERVICE_GAP\":%lu},",
+        (unsigned long)CanDiag::BASELINE, (unsigned long)CanDiag::PERIODIC,
+        (unsigned long)CanDiag::STATUS_CHANGE, (unsigned long)CanDiag::COUNTER_CHANGE,
+        (unsigned long)CanDiag::ALERT, (unsigned long)CanDiag::COUNTER_RESET,
+        (unsigned long)CanDiag::CONTROLLER_EPOCH, (unsigned long)CanDiag::RECOVERY_START,
+        (unsigned long)CanDiag::RECOVERY_ACCEPTED, (unsigned long)CanDiag::RECOVERY_FAILURE,
+        (unsigned long)CanDiag::RECOVERY_RUNNING, (unsigned long)CanDiag::BUS_OFF_ALERT,
+        (unsigned long)CanDiag::SERVICE_GAP)) return false;
+  static const char contextSources[] =
+      "\"txSources\":{\"FEATURE_UNSPECIFIED\":0,\"AUTO_BLINKER\":1,\"S3XY_BUTTON\":2,\"DRIVER_WINDOW_LAB\":3,"
+      "\"TLSSC\":4,\"TLSSC_CLEAR\":5,\"R79\":6,\"R79_REINJECT\":7,\"DMS\":8,\"DISPLAY\":9},"
+      "\"appNvsSources\":{\"SETTINGS\":1,\"BLE_REGISTRY\":2,\"PREHEAT\":3,\"BUS_OFF_EVIDENCE\":4,"
+      "\"WEB_RESET_NETWORK\":5,\"USB\":6,\"CONTINUOUS_AP\":7,\"CHECKED_BLOB\":8},\"flashCurrent\":";
+  if (!canDiagJsonAppend(json, contextSources, sizeof(contextSources) - 1u)) return false;
+  if (!canDiagJsonFlash(json, snapshot.flashCurrent) || !canDiagJsonAppendf(json, ",\"flashLast\":") ||
+      !canDiagJsonFlash(json, snapshot.flashLast) || !canDiagJsonAppendf(json,
+      ",\"flashHistory\":{\"capacity\":%lu,\"count\":%lu,\"observed\":%lu,\"overwritten\":%lu,\"windows\":[",
+      (unsigned long)CAN_ERROR_JSON_RING_CAPACITY, (unsigned long)snapshot.flashCount,
+      (unsigned long)snapshot.flashObserved, (unsigned long)snapshot.flashOverwritten)) return false;
+  for (uint32_t i = 0; i < snapshot.flashCount; ++i) {
+    if ((i && !canDiagJsonAppendf(json, ",")) || !canDiagJsonFlash(json, snapshot.flashWindows[i])) return false;
+  }
+  if (!canDiagJsonAppendf(json, "]},\"buses\":[")) return false;
+  for (uint8_t bus = 0; bus < 3u; ++bus) {
+    if ((bus && !canDiagJsonAppendf(json, ",")) || !canDiagJsonBus(json, snapshot.buses[bus], bus)) return false;
+  }
+  return canDiagJsonAppendf(json, "],\"driverErrorCapture\":") &&
+         canDiagJsonDriverCapture(json, driverSnapshot) && canDiagJsonAppendf(json, ",\"reinitializations\":") &&
+         canDiagJsonReinitializations(json, snapshot) && canDiagJsonAppendf(json, "}");
+}
+
+static void httpCanErrorsJson() {
+  CanDiagExportSnapshot<CanDiag::Snapshot> snapshot;
+  CanDiagExportSnapshot<P4TwaiErrorSnapshot> driverSnapshot;
+  String json;
+  if (!snapshot.value || !driverSnapshot.value || !canDiagSnapshot(*snapshot.value) ||
+      !p4TwaiDiagSnapshot(driverSnapshot.value) ||
+      !canDiagJsonSerialize(json, *snapshot.value, *driverSnapshot.value)) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"CAN error JSON preparation failed\"}");
+    return;
+  }
+  server.sendHeader("Content-Disposition", "attachment; filename=P4-CAN_CAN_ERRORS.json");
+  server.sendHeader("Cache-Control", "no-store");
+  server.setContentLength(json.length());
+  server.send(200, "application/json", json);
+}
+// End CAN error JSON export.
+
 static const char *canTxTraceSourceName(uint8_t source) {
   if (source == CAN_TX_TRACE_SOURCE_AUTO_BLINKER) return "AUTO_BLINKER";
   if (source == CAN_TX_TRACE_SOURCE_S3XY_BUTTON) return "S3XY_BUTTON";
@@ -1511,6 +2060,23 @@ static const char *canATxGateReasonName(uint8_t reason) {
   return reason == NATIVE_A_TX_OK ? "OK" : nagTxBlockReasonName(reason);
 }
 
+// Both frozen trace routes contain at most 64 rows. Assemble before success
+// headers so a slow/failed peer cannot cause one write retry loop per CSV row.
+// This bounds construction memory; the standard WebServer send may still wait
+// on a slow network peer and is not an end-to-end transport deadline.
+static constexpr size_t CAN_TX_TRACE_CSV_MAX_BYTES = 512u + 64u * 320u;
+static bool canTxTraceCsvAppend(String &csv, const char *line, int length,
+                                size_t capacity) {
+  if (!line || length < 0 || (size_t)length >= capacity) return false;
+  const size_t bytes = (size_t)length;
+  if (csv.length() > CAN_TX_TRACE_CSV_MAX_BYTES ||
+      bytes > CAN_TX_TRACE_CSV_MAX_BYTES - csv.length()) return false;
+  return csv.concat(line, (unsigned int)bytes);
+}
+static void canTxTraceCsvUnavailable() {
+  server.send(503, "application/json", "{\"ok\":false,\"error\":\"TX CSV preparation failed\"}");
+}
+
 static void httpCanATxTraceCsv() {
   CanATxTraceEntry entries[CAN_A_TX_TRACE_CAPACITY] = {};
   uint8_t count = 0;
@@ -1526,32 +2092,34 @@ static void httpCanATxTraceCsv() {
   memcpy(entries, canATxTraceFrozen, sizeof(CanATxTraceEntry) * count);
   portEXIT_CRITICAL(&canATxTraceMux);
 
-  server.sendHeader("Content-Disposition", "attachment; filename=P4-CAN_CANA_TX_TRACE.csv");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/csv", "");
+  String csv;
+  if (!csv.reserve(CAN_TX_TRACE_CSV_MAX_BYTES)) { canTxTraceCsvUnavailable(); return; }
   char line[384];
-  snprintf(line, sizeof(line),
+  int written = snprintf(line, sizeof(line),
            "#record_boot,%s\n#persist_state,%s\n#persist_error,%s\n#bus_off_ordinal,%lu\n#event_uptime_ms,%lu\n#entry_count,%u\n#snapshot_controllerState,0x%02X\n#snapshot_tx_fail_seq,%u\n#snapshot_rx_age_ms,%lu\n",
            canBusOffRecordBootName(CAN_BUS_OFF_BUS_A_PURE),
            canBusOffPersistStateName(CAN_BUS_OFF_BUS_A_PURE),
            canBusOffPersistErrorName(CAN_BUS_OFF_BUS_A_PURE),
            (unsigned long)busOffOrdinal, (unsigned long)frozenMs, (unsigned)count,
            (unsigned)snap.controllerState, (unsigned)snap.txFailConsecutive, (unsigned long)snap.rxAgeMs);
-  server.sendContent(line);
-  server.sendContent("seq,relative_ms,uptime_ms,id,source,dlc,nativeA_result,result_name,gate_reason,raw\n");
+  if (!canTxTraceCsvAppend(csv, line, written, sizeof(line))) { canTxTraceCsvUnavailable(); return; }
+  static const char columns[] = "seq,relative_ms,uptime_ms,id,source,dlc,nativeA_result,result_name,gate_reason,raw\n";
+  if (!canTxTraceCsvAppend(csv, columns, sizeof(columns) - 1, sizeof(columns))) { canTxTraceCsvUnavailable(); return; }
   for (uint8_t i = 0; i < count; i++) {
     const CanATxTraceEntry &e = entries[i];
     char raw[32] = {};
     canTxTraceRawHex(e.data, e.dlc, raw, sizeof(raw));
     const int32_t rel = frozenMs ? (int32_t)(e.capturedMs - frozenMs) : 0;
     const char *resultName = e.result == (int32_t)ESP_OK ? "OK" : "ERROR";
-    snprintf(line, sizeof(line), "%lu,%ld,%lu,0x%03X,%s,%u,%ld,%s,%s,%s\n",
+    written = snprintf(line, sizeof(line), "%lu,%ld,%lu,0x%03X,%s,%u,%ld,%s,%s,%s\n",
              (unsigned long)e.seq, (long)rel, (unsigned long)e.capturedMs,
              (unsigned)e.id, canATxTraceSourceName(e.source, e.id), (unsigned)e.dlc,
              (long)e.result, resultName, canATxGateReasonName(e.reason), raw);
-    server.sendContent(line);
+    if (!canTxTraceCsvAppend(csv, line, written, sizeof(line))) { canTxTraceCsvUnavailable(); return; }
   }
-  server.sendContent("");
+  server.sendHeader("Content-Disposition", "attachment; filename=P4-CAN_CANA_TX_TRACE.csv");
+  server.setContentLength(csv.length());
+  server.send(200, "text/csv", csv);
 }
 
 static const char *canBTxTraceSourceName(uint8_t source, uint16_t id) {
@@ -1580,30 +2148,34 @@ static void httpCanBTxTraceCsv() {
   memcpy(entries, canBTxTraceFrozen, sizeof(CanBTxTraceEntry) * count);
   portEXIT_CRITICAL(&canBTxTraceMux);
 
-  server.sendHeader("Content-Disposition", "attachment; filename=P4-CAN_CANB_TX_TRACE.csv");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/csv", "");
+  String csv;
+  if (!csv.reserve(CAN_TX_TRACE_CSV_MAX_BYTES)) { canTxTraceCsvUnavailable(); return; }
   char line[320];
-  snprintf(line, sizeof(line), "#record_boot,%s\n#persist_state,%s\n#persist_error,%s\n#bus_off_ordinal,%lu\n#event_uptime_ms,%lu\n#entry_count,%u\n",
+  int written = snprintf(line, sizeof(line), "#record_boot,%s\n#persist_state,%s\n#persist_error,%s\n#bus_off_ordinal,%lu\n#event_uptime_ms,%lu\n#entry_count,%u\n",
            canBusOffRecordBootName(CAN_BUS_OFF_BUS_B_PURE),
            canBusOffPersistStateName(CAN_BUS_OFF_BUS_B_PURE),
            canBusOffPersistErrorName(CAN_BUS_OFF_BUS_B_PURE),
            (unsigned long)busOffOrdinal, (unsigned long)frozenMs, (unsigned)count);
-  server.sendContent(line);
-  server.sendContent("seq,relative_ms,uptime_ms,id,source,dlc,result,result_name,raw\n");
+  if (!canTxTraceCsvAppend(csv, line, written, sizeof(line))) { canTxTraceCsvUnavailable(); return; }
+  static const char columns[] = "seq,relative_ms,uptime_ms,id,source,dlc,result,result_name,raw\n";
+  if (!canTxTraceCsvAppend(csv, columns, sizeof(columns) - 1, sizeof(columns))) { canTxTraceCsvUnavailable(); return; }
   for (uint8_t i = 0; i < count; i++) {
     const CanBTxTraceEntry &e = entries[i];
     char raw[32] = {};
     canTxTraceRawHex(e.data, e.dlc, raw, sizeof(raw));
     const int32_t rel = frozenMs ? (int32_t)(e.capturedMs - frozenMs) : 0;
-    snprintf(line, sizeof(line), "%lu,%ld,%lu,0x%03X,%s,%u,%ld,%s,%s\n",
+    written = snprintf(line, sizeof(line), "%lu,%ld,%lu,0x%03X,%s,%u,%ld,%s,%s\n",
              (unsigned long)e.seq, (long)rel, (unsigned long)e.capturedMs,
              (unsigned)e.id, canBTxTraceSourceName(e.source, e.id), (unsigned)e.dlc,
              (long)e.result, esp_err_to_name((esp_err_t)e.result), raw);
-    server.sendContent(line);
+    if (!canTxTraceCsvAppend(csv, line, written, sizeof(line))) { canTxTraceCsvUnavailable(); return; }
   }
-  server.sendContent("");
+  server.sendHeader("Content-Disposition", "attachment; filename=P4-CAN_CANB_TX_TRACE.csv");
+  server.setContentLength(csv.length());
+  server.send(200, "text/csv", csv);
 }
+
+
 
 
 // ─── Wi-Fi access-point configuration ────────────────────────
@@ -1661,8 +2233,8 @@ static void wifiApLoadConfig(String &ssid, String &password) {
 static bool wifiApPersistConfig(const String &ssid, const String &password) {
   Preferences p;
   if (!p.begin("wifiap", false)) return false;
-  const size_t a = p.putString("ssid", ssid);
-  const size_t b = p.putString("pass", password);
+  const size_t a = P4_CAN_DIAG_NVS_WRITE(5, p.putString("ssid", ssid));
+  const size_t b = P4_CAN_DIAG_NVS_WRITE(5, p.putString("pass", password));
   p.end();
   return a > 0 && b > 0;
 }
@@ -1801,6 +2373,10 @@ static bool httpS3xyRequireBluetooth() {
 }
 
 static void httpS3xyBluetoothEnable() {
+  if (!p4CanGpioValid) {
+    server.send(409, "application/json", "{\"ok\":false,\"error\":\"Repair CAN GPIO and reboot before enabling Bluetooth\"}");
+    return;
+  }
   // If an OFF transition is still draining, finish that serialized shutdown
   // before starting a fresh same-boot BLE runtime. Also repair the defensive
   // edge case where the master flag is already OFF but the mapper still exists.
@@ -2212,7 +2788,7 @@ static const char *researchCapturePhysicalBusName(uint8_t bus) {
 }
 
 static const char *researchCaptureProfileBusName(uint8_t bus) {
-  return bus <= RESEARCH_CAPTURE_BUS_EXTRA ? p4CanNames[p4CanLogicalBus(bus)] : "UNKNOWN";
+  return bus <= RESEARCH_CAPTURE_BUS_EXTRA ? p4CanRoleName(p4CanLogicalBus(bus)) : "UNKNOWN";
 }
 
 static String researchCaptureStatsToJson() {
@@ -2333,7 +2909,7 @@ static String researchCaptureStatsToJson() {
   portENTER_CRITICAL(&researchCaptureMux);
   allocatedMainBytes = researchCaptureAllocatedMainBytes;
   allocatedAuxBytes = researchCaptureAllocatedAuxBytes;
-  allocatedCommonBytes = (researchCaptureLatest ? RESEARCH_CAPTURE_LATEST_BYTES : 0U)
+  allocatedCommonBytes = (researchCaptureLatest ? RESEARCH_CAPTURE_LATEST_BYTES + RESEARCH_CAPTURE_FROZEN_BYTES : 0U)
                        + (researchCaptureKnownIndices ? RESEARCH_CAPTURE_KNOWN_BYTES : 0U);
   portEXIT_CRITICAL(&researchCaptureMux);
   const size_t memoryBytes = allocatedMainBytes + allocatedAuxBytes + allocatedCommonBytes;
@@ -2431,7 +3007,7 @@ static String researchCaptureStatsToJson() {
   jw.u32("psramFreeBytes", (uint32_t)(psramFreeBytes));
   jw.string("snapshotPlan", rawMode
       ? (mode == RESEARCH_CAPTURE_MODE_ULC_CONFIRM
-          ? "ULC CONFIRM targeted RX · PRE 3s + trigger + POST 7s · 6 IDs · BODY + CHASSIS + PARTY"
+          ? "ULC CONFIRM targeted RX · PRE 3s + trigger + POST 7s · 6 IDs · CAN 1 + CAN 2 + CAN 3"
           : mode == RESEARCH_CAPTURE_MODE_RAW_AUTO_ALC
             ? "RAW AUTO LEFT OPEN 6/8 ↔ BLOCKED other state · PRE 2s + POST 2s · manual C/D PRE 5s + POST 2s"
             : "RAW RX ring PRE 5s + trigger + POST 2s · auto re-arm")
@@ -2462,7 +3038,6 @@ static void httpResearchCaptureStats() {
 }
 
 static void httpResearchCaptureStart() {
-  if (!httpRequireLab()) return;
   const uint8_t slot = server.hasArg("slot") ? researchCaptureParseSlot(server.arg("slot")) : RESEARCH_CAPTURE_LABEL_NONE;
   if (slot >= RESEARCH_CAPTURE_LABEL_SLOTS) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"slot must be A, B, C or D\"}");
@@ -2473,7 +3048,6 @@ static void httpResearchCaptureStart() {
 }
 
 static void httpResearchCaptureLabels() {
-  if (!httpRequireLab()) return;
   if (!server.hasArg("slot") || !server.hasArg("label")) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"slot and label are required\"}");
     return;
@@ -2489,7 +3063,6 @@ static void httpResearchCaptureLabels() {
 
 
 static void httpResearchCaptureConfig() {
-  if (!httpRequireLab()) return;
   if (!server.hasArg("preMs") || !server.hasArg("postMs")) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"preMs and postMs are required\"}");
     return;
@@ -2508,7 +3081,6 @@ static void httpResearchCaptureConfig() {
 }
 
 static void httpResearchCaptureMode() {
-  if (!httpRequireLab()) return;
   if (!server.hasArg("mode")) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"mode is required\"}");
     return;
@@ -2530,7 +3102,6 @@ static void httpResearchCaptureMode() {
 }
 
 static void httpResearchCaptureReset() {
-  if (!httpRequireLab()) return;
   portENTER_CRITICAL(&researchCaptureMux);
   const bool exporting = researchCaptureExporting;
   portEXIT_CRITICAL(&researchCaptureMux);
@@ -2628,7 +3199,8 @@ static void httpResearchCaptureCsv() {
   // immutable until this flag is cleared.
   portENTER_CRITICAL(&researchCaptureMux);
   state = researchCaptureState;
-  if (state == RESEARCH_CAPTURE_CAPTURING || researchCaptureExporting) {
+  if (state == RESEARCH_CAPTURE_CAPTURING || researchCaptureExporting ||
+      researchCaptureSnapshotBusy || researchCaptureRawCopyPendingLocked()) {
     portEXIT_CRITICAL(&researchCaptureMux);
     server.send(409, "application/json", "{\"ok\":false,\"error\":\"capture or CSV export still active\"}");
     return;
@@ -2851,7 +3423,23 @@ static void httpDriverMonitorCsv() {
   driverMonitorCaptureEndExport();
 }
 
-static void httpSystemStats() { server.send(200, "application/json", systemStatsToJson()); }
+static void httpSystemStats() {
+  const String section = server.hasArg("section") ? server.arg("section") : String();
+  if (!systemStatsSectionValid(section.c_str())) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"unknown-system-section\"}");
+    return;
+  }
+  const String view = server.hasArg("view") ? server.arg("view") : String();
+  if (server.hasArg("view")) {
+    const bool canSection = section == "can1" || section == "can2" || section == "can3";
+    const bool validView = view == "status" || view == "traffic" || view == "errors" || view == "recovery";
+    if (!canSection || !validView) {
+      server.send(400, "application/json", "{\"ok\":false,\"error\":\"unknown-can-view\"}");
+      return;
+    }
+  }
+  server.send(200, "application/json", systemStatsToJson(section.c_str(), view.c_str()));
+}
 
 
 
@@ -2863,6 +3451,7 @@ static void writeProfileCapabilityJson(JsonWriterArduino &jw) {
   jw.boolean("advancedEapSupported", activeProfileAdvancedEapSupported());
   jw.boolean("pedalMapSupported", activeProfilePedalMapSupported());
   jw.boolean("apDriveProfileSupported", activeProfileApDriveProfileSupported());
+  jw.boolean("preheatSupported", activeProfilePreheatSupported());
   jw.boolean("apDriveProfile", activeProfileApDriveProfileSupported() && apDriveProfileEnabled);
   jw.u32("apDriveProfileRegenRaw", apDriveProfileRegenRaw);
   jw.string("apDriveProfileRegenName", apDriveRegenNamePure(apDriveProfileRegenRaw));
@@ -2885,14 +3474,12 @@ static String vehicleProfileStatusJson() {
   jw.string("topologyName", vehicleProfileTopologyName(activeVehicleTopology));
   jw.string("canA", activeProfileCanAName());
   jw.string("canB", activeProfileCanBName());
-  jw.string("canExtra", p4CanNames[p4CanBusExtra()]);
+  jw.string("canExtra", p4CanRoleName(p4CanBusExtra()));
   jw.u32("routeABus", p4CanBusA()+1);
   jw.u32("routeBBus", p4CanBusB()+1);
   jw.u32("turn", activeTurnSignalVariant);
   jw.string("turnName", turnSignalVariantName(activeTurnSignalVariant));
   writeProfileCapabilityJson(jw);
-  jw.boolean("tlsscRestoreSupported", activeProfileTlsscRestoreSupported());
-  jw.boolean("bannedSupported", activeProfileBannedCarSupported());
   jw.finish();
   return j;
 }
@@ -2904,12 +3491,9 @@ static String v3FeaturePolicyJson() {
   JsonWriterArduino jw(j);
   jw.boolean("ok", true);
   jw.boolean("lab", labMenuEnabled);
+  jw.boolean("preheat", preheatMenuEnabled);
   jw.boolean("doorCancel", doorCancelReported);
   writeProfileCapabilityJson(jw);
-  jw.boolean("banned", bannedCar);
-  jw.boolean("tlsscRestore", tlsscRestoreEnabled);
-  jw.boolean("tlsscRestoreSupported", activeProfileTlsscRestoreSupported());
-  jw.boolean("bannedSupported", activeProfileBannedCarSupported());
   jw.boolean("s3xy", s3xyBluetoothMasterIsEnabled());
   jw.finish();
   return j;
@@ -3168,6 +3752,7 @@ static void httpFeatureLab() {
     driverMonitorCaptureInit();
   } else if (!enabled) {
     portENTER_CRITICAL(&researchCaptureMux);
+    researchCaptureSnapshotCancelled = true;
     if (!researchCaptureExporting && researchCaptureState == RESEARCH_CAPTURE_CAPTURING)
       researchCaptureState = RESEARCH_CAPTURE_PAUSED;
     portEXIT_CRITICAL(&researchCaptureMux);
@@ -3177,6 +3762,61 @@ static void httpFeatureLab() {
   server.send(200, "application/json", v3FeaturePolicyJson());
 }
 
+
+static bool httpDecimalTenthsInRange(const String &raw, int32_t minimum,
+                                     int32_t maximum, int32_t &out) {
+  if (raw.length() == 0u || raw.length() > 8u) return false;
+  size_t i = 0;
+  int32_t sign = 1;
+  if (raw.charAt(0) == '-') {
+    sign = -1;
+    i = 1;
+  } else if (raw.charAt(0) == '+') {
+    i = 1;
+  }
+  int32_t whole = 0;
+  bool sawWhole = false;
+  for (; i < raw.length(); ++i) {
+    const char ch = raw.charAt(i);
+    if (ch == '.') break;
+    if (ch < '0' || ch > '9') return false;
+    whole = whole * 10 + (int32_t)(ch - '0');
+    if (whole > 1000) return false;
+    sawWhole = true;
+  }
+  if (!sawWhole) return false;
+  int32_t frac = 0;
+  if (i < raw.length()) {
+    // raw.charAt(i) is '.', and exactly one digit must follow it.
+    if (i + 2u != raw.length()) return false;
+    const char ch = raw.charAt(i + 1u);
+    if (ch < '0' || ch > '9') return false;
+    frac = (int32_t)(ch - '0');
+  }
+  const int32_t value = sign * (whole * 10 + frac);
+  if (value < minimum || value > maximum) return false;
+  out = value;
+  return true;
+}
+
+static void httpFeaturePreheat() {
+  bool enabled;
+  if (!httpBoolArg("enabled", enabled)) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid enabled\"}");
+    return;
+  }
+  if (enabled && !activeProfilePreheatSupported()) {
+    server.send(409, "application/json",
+                "{\"ok\":false,\"error\":\"preheat requires the Vehicle/Body CAN\"}");
+    return;
+  }
+  if (!preheatMenuSetEnabled(enabled)) {
+    server.send(500, "application/json",
+                "{\"ok\":false,\"error\":\"Settings could not be saved\"}");
+    return;
+  }
+  server.send(200, "application/json", v3FeaturePolicyJson());
+}
 
 static void httpFeatureDoorCancel() {
   FeatureCfgSnapshot next = featureCfgRuntimeSnapshot();
@@ -3246,50 +3886,6 @@ static void httpFeatureApDriveProfile() {
   server.send(200, "application/json", v3FeaturePolicyJson());
 }
 
-static void httpFeatureBanned() {
-  const FeatureCfgSnapshot before = featureCfgRuntimeSnapshot();
-  bool enabled;
-  if (!httpBoolArg("enabled", enabled)) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid enabled\"}");
-    return;
-  }
-  if (enabled && !activeProfileBannedCarSupported()) {
-    server.send(409, "application/json", "{\"ok\":false,\"error\":\"banned car not supported for current profile\"}");
-    return;
-  }
-  FeatureCfgSnapshot next = before;
-  next.banned = enabled;
-  if (!enabled) next.restore = false;
-  setCanTxAdministrativeHold(true);
-  if (!featureCfgPersistCandidate(next)) {
-    setCanTxAdministrativeHold(false);
-    server.send(500, "application/json", "{\"ok\":false,\"error\":\"Settings could not be saved\"}"); return;
-  }
-  featureCfgRuntimeRestore(next);
-  setCanTxAdministrativeHold(false);
-  server.send(200, "application/json", v3FeaturePolicyJson());
-}
-
-static void httpFeatureTlsscRestore() {
-  FeatureCfgSnapshot next = featureCfgRuntimeSnapshot();
-  bool enabled;
-  if (!httpBoolArg("enabled", enabled)) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid enabled\"}");
-    return;
-  }
-  if (enabled && (!activeProfileBannedCarSupported() || !bannedCar || !activeProfileTlsscRestoreSupported())) {
-    server.send(409, "application/json", "{\"ok\":false,\"error\":\"restore not allowed for current state/profile\"}");
-    return;
-  }
-  next.restore = enabled;
-  if (!featureCfgPersistCandidate(next)) {
-    server.send(500, "application/json", "{\"ok\":false,\"error\":\"Settings could not be saved\"}");
-    return;
-  }
-  featureCfgRuntimeRestore(next);
-  server.send(200, "application/json", v3FeaturePolicyJson());
-}
-
 static void httpFeatureS3xy() {
   bool enabled;
   if (!httpBoolArg("enabled", enabled)) {
@@ -3300,26 +3896,132 @@ static void httpFeatureS3xy() {
   else httpS3xyBluetoothDisable();
 }
 
+// CAN GPIO configuration: boot-only pins, complete checked record and no hot apply.
+static String p4CanGpioMapJson(const P4CanGpioMap &map) {
+  String json = "[";
+  for (unsigned bus = 0; bus < 3; ++bus) {
+    if (bus) json += ',';
+    char row[40];
+    snprintf(row, sizeof(row), "{\"tx\":%u,\"rx\":%u}", map.tx[bus], map.rx[bus]);
+    json += row;
+  }
+  json += ']';
+  return json;
+}
+static String p4CanGpioAllowedPinsJson() {
+  String json = "[";
+  bool first = true;
+  for (unsigned pin = 0; pin < P4_CAN_GPIO_COUNT; ++pin) {
+    if (!p4CanGpioPinAllowedPure(pin)) continue;
+    if (!first) json += ',';
+    first = false;
+    char value[4];
+    snprintf(value, sizeof(value), "%u", pin);
+    json += value;
+  }
+  json += ']';
+  return json;
+}
+static bool p4CanGpioCanStopped() {
+  if (__atomic_load_n(&canMaintenanceStopped, __ATOMIC_ACQUIRE)) return true;
+  for (unsigned bus = 0; bus < 3; ++bus) if (p4CanHandles[bus]) return false;
+  return true;
+}
+static void httpCanGpioFailure(int status, const char *error) {
+  String json;
+  JsonWriterArduino jw(json);
+  jw.boolean("ok", false);
+  jw.string("error", error);
+  jw.boolean("canStopped", p4CanGpioCanStopped());
+  jw.boolean("rebootRequired", canMaintenanceActive() || !p4CanGpioValid);
+  jw.finish();
+  server.send(status, "application/json", json);
+}
+static void httpCanGpioStatus() {
+  P4CanGpioMap saved{};
+  const P4CanGpioSavedState state = p4CanGpioReadSaved(saved);
+  const bool savedValid = state == P4_GPIO_VALID || state == P4_GPIO_MISSING;
+  const P4CanGpioMap active = p4CanGpioActiveMap();
+  const char *error = p4CanGpioLastError;
+  if (state == P4_GPIO_CORRUPT) error = "Stored CAN GPIO record is invalid";
+  else if (state == P4_GPIO_READ_ERROR) error = "CAN GPIO storage read failed";
+  else if (!p4CanGpioValid && !*error) error = "Saved CAN GPIO mapping requires reboot";
+  String json;
+  json.reserve(460);
+  JsonWriterArduino jw(json);
+  jw.boolean("ok", true);
+  jw.boolean("valid", p4CanGpioValid);
+  if (p4CanGpioValid) jw.raw("active", p4CanGpioMapJson(active));
+  else jw.raw("active", "null");
+  if (savedValid) jw.raw("saved", p4CanGpioMapJson(saved));
+  else jw.raw("saved", "null");
+  jw.raw("defaults", p4CanGpioMapJson(p4CanGpioDefaultsPure()));
+  jw.raw("allowedPins", p4CanGpioAllowedPinsJson());
+  jw.boolean("rebootRequired", canMaintenanceActive() || !p4CanGpioValid ||
+      !savedValid || !p4CanGpioMapsEqualPure(active, saved));
+  jw.boolean("canStopped", p4CanGpioCanStopped());
+  jw.string("error", error);
+  jw.finish();
+  server.send(200, "application/json", json);
+}
+static void httpCanGpioSet() {
+  static const char *const keys[] = {"tx1", "rx1", "tx2", "rx2", "tx3", "rx3"};
+  P4CanGpioMap candidate{};
+  for (unsigned i = 0; i < 6; ++i) {
+    if (!server.hasArg(keys[i])) {
+      httpCanGpioFailure(400, "All six CAN GPIO values are required");
+      return;
+    }
+    const String raw = server.arg(keys[i]);
+    uint8_t pin;
+    if (raw.length() != strlen(raw.c_str()) || !p4CanGpioParsePinPure(raw.c_str(), pin)) {
+      httpCanGpioFailure(400, "CAN GPIO values must be ASCII decimal integers");
+      return;
+    }
+    if (i & 1u) candidate.rx[i / 2] = pin;
+    else candidate.tx[i / 2] = pin;
+  }
+  if (!p4CanGpioMapValidPure(candidate)) {
+    httpCanGpioFailure(400, "Use six unique GPIOs in 0-54 not already used by C6 or USB");
+    return;
+  }
+  // The irreversible maintenance request parks CAN even on handshake failure.
+  // Never write/reboot until confirmed; the UI can retry or explicitly reboot.
+  if (!prepareCanForMaintenance()) {
+    p4CanGpioLastError = "CAN stop not confirmed; CAN may remain stopped; reboot required";
+    httpCanGpioFailure(503, p4CanGpioLastError);
+    return;
+  }
+  if (!p4CanGpioPersist(candidate)) {
+    httpCanGpioFailure(500, p4CanGpioLastError);
+    return;
+  }
+  server.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+  delay(250);
+  restartP4CanSafely();
+}
+// End CAN GPIO configuration.
+
 static bool resetFirmwareSettingsPreserveProfileAndBle() {
   // Deliberately preserve v3profile, wifiap, s3xy and s3xyreg. p4meta is internal
   // schema metadata and is also preserved so a settings reset cannot replay
   // old migrations.
   static const char *const clearNamespaces[] = {
     "nag", "summon", "lab3f8", "ulc", "alc293lab", "countrylab", "r79lab", "r79", "lanegraph",
-    "researchcap", "features", "labv3fd"
+    "researchcap", "features", "labv3fd", "preheat"
   };
   bool ok = true;
   for (const char *ns : clearNamespaces) {
     Preferences p;
     if (!p.begin(ns, false)) { ok = false; continue; }
-    if (!p.clear()) ok = false;
+    if (!P4_CAN_DIAG_NVS_WRITE(5, p.clear())) ok = false;
     p.end();
   }
   return ok;
 }
 
 static bool factoryResetAllNvs() {
-  const esp_err_t eraseErr = nvs_flash_erase();
+  const esp_err_t eraseErr = P4_CAN_DIAG_NVS_WRITE(5, nvs_flash_erase());
   if (eraseErr != ESP_OK) return false;
   const esp_err_t initErr = nvs_flash_init();
   if (initErr != ESP_OK) return false;
@@ -3346,8 +4048,8 @@ static bool resetNvsKeepBleGuardWrite(bool active) {
   Preferences p;
   if (!p.begin(NVS_KEEP_BLE_RESET_GUARD_NAMESPACE, false)) return false;
   const bool ok = active
-      ? p.putBool(NVS_KEEP_BLE_RESET_GUARD_KEY, true) > 0u
-      : p.clear();
+      ? P4_CAN_DIAG_NVS_WRITE(5, p.putBool(NVS_KEEP_BLE_RESET_GUARD_KEY, true)) > 0u
+      : P4_CAN_DIAG_NVS_WRITE(5, p.clear());
   p.end();
   return ok;
 }
@@ -3358,7 +4060,7 @@ static bool resetNvsKeepBleClearApplicationNamespaces() {
   static const char *const clearNamespaces[] = {
     "v3profile", "wifiap", "nag", "summon", "lab3f8", "ulc",
     "alc293lab", "countrylab", "r79lab", "r79", "lanegraph", "researchcap", "features",
-    "p4CanDiag", "p4meta", "labv3fd"
+    "p4CanDiag", "p4meta", "labv3fd", "preheat"
   };
   static_assert(
       sizeof(clearNamespaces) / sizeof(clearNamespaces[0]) ==
@@ -3368,7 +4070,7 @@ static bool resetNvsKeepBleClearApplicationNamespaces() {
   for (const char *ns : clearNamespaces) {
     Preferences p;
     if (!p.begin(ns, false)) { ok = false; continue; }
-    if (!p.clear()) ok = false;
+    if (!P4_CAN_DIAG_NVS_WRITE(5, p.clear())) ok = false;
     p.end();
   }
   return ok;
@@ -3423,7 +4125,6 @@ static void httpResetFirmwareSettings() {
   }
   setCanTxAdministrativeHold(true);
   invalidateCanTxStateForFullRecovery();
-  tlsscRestoreEnabled = false;
   if (!resetFirmwareSettingsPreserveProfileAndBle()) {
     setCanTxAdministrativeHold(false);
     server.send(500, "application/json", "{\"ok\":false,\"error\":\"settings reset failed\"}");
@@ -3898,6 +4599,45 @@ static void httpDasTelemetryStats() {
 }
 
 
+static void httpServiceSettingsStats(){
+  portENTER_CRITICAL(&serviceSettingsMux);const bool enabled=chinaRestoreEnabled;const uint32_t ok=chinaRestoreTxOk,fail=chinaRestoreTxFail;portEXIT_CRITICAL(&serviceSettingsMux);
+  String json;JsonWriterArduino jw(json);jw.boolean("ok",true);jw.boolean("chinaRestore",enabled);jw.u32("restoreTxOk",ok);jw.u32("restoreTxFail",fail);
+  jw.boolean("canEnter",!canTxAdministrativeHold&&!canUsbPassive()&&p4CanAllRunning());jw.finish();server.send(200,"application/json",json);
+}
+static void httpServiceSettingsEnter(){if(serviceSettingsEnter()!=ESP_OK){server.send(409,"application/json","{\"error\":\"tx-unavailable\"}");return;}httpServiceSettingsStats();}
+static void httpServiceSettingsRestore(){bool enabled;if(!httpBoolArg("enabled",enabled)){server.send(400,"application/json","{\"error\":\"invalid-enabled\"}");return;}if(!serviceSettingsSetRestore(enabled)){server.send(503,"application/json","{\"error\":\"save-failed-or-busy\"}");return;}httpServiceSettingsStats();}
+
+#include "automatic_shift/gear_shift_web.h"
+
+static void httpFsdSettingsStats() {
+  const uint32_t epoch=canTxEpochSnapshot(), now=(uint32_t)millis();
+  String json; JsonWriterArduino jw(json);
+  portENTER_CRITICAL(&fsdSettingsMux);
+  const bool enabled=fsdSettingsEnabled, suspendAp=fsdSettingsSuspendAp; const uint8_t values=fsdSettingsValues;
+  uint8_t stock[8]; bool fresh[2]; uint32_t ok=fsdSettingsTxOk,fail=fsdSettingsTxFail;
+  memcpy(stock,fsdSettingsStock,sizeof(stock));
+  for(uint8_t i=0;i<2;i++) fresh[i]=fsdSettingsSeen[i] && epoch!=0u && fsdSettingsEpoch[i]==epoch && now-fsdSettingsMs[i]<=3000u;
+  portEXIT_CRITICAL(&fsdSettingsMux);
+  jw.boolean("ok",true);jw.boolean("suspendDuringAp",suspendAp);jw.boolean("apBlocked",fsdSettingsApBlocked());jw.boolean("enabled",enabled);jw.u32("values",values);
+  for(uint8_t i=0;i<8;i++){String key="stock";key+=i;jw.u32(key.c_str(),stock[i]);}
+  jw.boolean("mux0Fresh",fresh[0]);jw.boolean("mux2Fresh",fresh[1]);jw.u32("txOk",ok);jw.u32("txFail",fail);
+  jw.finish();server.send(200,"application/json",json);
+}
+static void httpFsdSettingsUpdate() {
+  bool enabled;
+  portENTER_CRITICAL(&fsdSettingsMux);bool suspendAp=fsdSettingsSuspendAp;portEXIT_CRITICAL(&fsdSettingsMux);
+  if(server.hasArg("suspendDuringAp") && !httpBoolArg("suspendDuringAp",suspendAp)){server.send(400,"application/json","{\"error\":\"invalid-suspendDuringAp\"}");return;}
+  const String raw=server.arg("values");
+  int values=0;
+  if(!httpBoolArg("enabled",enabled) || raw.length()==0 || raw.length()>3) {server.send(400,"application/json","{\"error\":\"invalid-settings\"}");return;}
+  for(unsigned int i=0;i<raw.length();i++){if(raw[i]<'0'||raw[i]>'9'){server.send(400,"application/json","{\"error\":\"invalid-values\"}");return;}values=values*10+raw[i]-'0';}
+  if(values!=0&&values!=2){server.send(400,"application/json","{\"error\":\"invalid-values\"}");return;}
+  if(!canTxBarrierMutex || xSemaphoreTake(canTxBarrierMutex,pdMS_TO_TICKS(100))!=pdTRUE){server.send(409,"application/json","{\"error\":\"tx-busy\"}");return;}
+  if(!fsdSettingsSave(enabled,(uint8_t)values,suspendAp)){xSemaphoreGive(canTxBarrierMutex);server.send(503,"application/json","{\"error\":\"save-failed\"}");return;}
+  portENTER_CRITICAL(&fsdSettingsMux);fsdSettingsEnabled=enabled;fsdSettingsSuspendAp=suspendAp;fsdSettingsValues=(uint8_t)values;portEXIT_CRITICAL(&fsdSettingsMux);
+  xSemaphoreGive(canTxBarrierMutex);httpFsdSettingsStats();
+}
+
 static bool httpRequireLab() {
   if (labMenuEnabled) return true;
   server.send(409, "application/json", "{\"ok\":false,\"error\":\"LAB disabled\"}");
@@ -3972,6 +4712,248 @@ static void httpDriverWindowLabOpen() {
   const DriverWindowArmResultPure result = driverWindowLabRequestOpen();
   server.send(result == DRIVER_WINDOW_ARM_OK ? 202 : 409,
               "application/json", driverWindowLabStatsToJson());
+}
+
+static String preheatStatsToJson() {
+  PreheatRuntimeSnapshot s = {};
+  preheatRuntimeSnapshot((uint32_t)millis(), s);
+
+  String j;
+  j.reserve(1400);
+  JsonWriterArduino jw(j);
+  jw.boolean("ok", true);
+  jw.boolean("supported", s.supported);
+  jw.boolean("enabled", s.enabled);
+  // Auto-off target, in tenths of a degree Celsius rendered with one decimal.
+  // The tab posts it back as targetC, and reads targetReached from the same
+  // predicate the engine switches itself off with - the pack average reaching
+  // the target - so the two cannot disagree.
+  jw.fixed("targetC", (int32_t)s.targetCx10, 1);
+  jw.boolean("targetReached", s.targetReached);
+  // The payload is a fixed constant, so there is no mode to report: the tab reads
+  // lastTxRaw to see what actually went out.
+  jw.boolean("active", s.active);
+  // The live gate, not the history: lastSkipReason still reads BOOT_DELAY
+  // minutes after boot, so a tab that used it could not tell a stalled engine
+  // from a transmitting one. blocked is true exactly when the engine is armed
+  // and a gate is holding it back - the state the strip must never paint as
+  // "Heating" - and blockedReason names that gate. evalAgeMs grows only when the
+  // CAN service stage itself stops running, which the skip counters cannot show
+  // because they freeze along with it.
+  jw.boolean("blocked", s.blocked);
+  jw.string("blockedReason", preheatSkipReasonName(s.evalReason));
+  jw.u32("evalAgeMs", s.evalAgeMs);
+  // The spec declares this field but never defines its threshold, and the car's
+  // own gate (0x212 bit 5) never rises on this firmware - all 268 captured
+  // frames were byte-identical while the pack heated at 8 kW. Reporting false
+  // keeps row 1 on the real state instead of guessing "Battery warm"; the pack
+  // temperature itself is row 2 and the heating state is row 5.
+  jw.boolean("batteryWarm", false);
+  jw.u32("txOk", s.txOk);
+  jw.u32("txFail", s.txFail);
+  jw.u32("lastReason", s.lastReason);
+  jw.boolean("sourceSeen", s.sourceSeen);
+  jw.u32("skipNoSource", s.sourceSkipped);
+  // Witness fields, for a field report that has no CAN log. tripId is the ID the
+  // car's own trip planning was seen on - "0x082", "0x347" on HW4, or "unknown"
+  // until the car has sent one (blockedReason NO_TRIP_ID). srcRaw is the last frame
+  // the car itself sent on it, lastTxRaw the frame this engine sent - a constant
+  // per ID, "AB 50 C8 13 FF 03 8E 14" on 0x082 and "AF 24 9D 1D FF 03 F2 07" on
+  // 0x347, every 100 ms - so the src* booleans describe the car's own claim rather
+  // than a decision this feature made on it.
+  jw.string("tripId", preheatTripIdName(s.tripId));
+  jw.string("srcRaw", s.sourceSeen ? lab3f8RawHex(s.srcRaw, PREHEAT_DLC) : String());
+  jw.u32("srcAgeMs", s.sourceAgeMs);
+  jw.boolean("srcEnergiesValid", s.srcEnergiesValid);
+  jw.boolean("srcRouteBits", s.srcRouteBits);
+  jw.boolean("energyCacheValid", s.energyCacheValid);
+  jw.string("lastTxRaw", s.lastTxValid ? lab3f8RawHex(s.lastTxRaw, PREHEAT_DLC) : String());
+  jw.boolean("packSeen", s.packSeen);
+  jw.fixed("packTempMinC", s.packTempMinCx10, 1);
+  jw.fixed("packTempMaxC", s.packTempMaxCx10, 1);
+  // The car's own average, BMS_thermistorTAvg (0x332 mux 0). It is the number the
+  // auto-off compares AND the one the PACK TEMP cell prints, and the cell
+  // alternates it with the range above. It is read from the car rather than
+  // computed from min/max: across 180 mux-0 frames of the eight captures the
+  // derived pair disagrees with what the car sends in 111 of them, by up to
+  // 0.5 C. The tab does no arithmetic on sensor readings, so it could not be
+  // derived in the browser anyway.
+  jw.fixed("packTempAvgC", s.packAvgCx10, 1);
+  jw.boolean("bmsSeen", s.bmsSeen);
+  jw.boolean("bmsPreconditionAllowed", s.bmsAllowed);
+  jw.boolean("bmsHeatingWorthwhile", s.bmsWorthwhile);
+  jw.boolean("bmsKeepWarmRequest", s.bmsKeepWarm);
+  // 0x252 BMS_maxStationaryHeatPower: what the BMS will ALLOW the pack to be
+  // heated with, not what is flowing. It is a raw telemetry row now rather than
+  // the HEAT POWER cell, because the two are not the same number: a PASSIVE log
+  // read 0.00 kW here in all 1213 of its frames while the drive units held 3.60 kW
+  // each for 34 seconds, and a research capture read 5.00 kW in the
+  // home-route segment where nothing was heating at all. The value is served as
+  // ptHeatLimitKw with the age of the frame it came from.
+  jw.boolean("coolantSeen", s.coolantSeen);
+  jw.fixed("coolantFlowLpm", (int32_t)s.coolantLpmX10, 1);
+  jw.boolean("heatingSeen", s.heatingSeen);
+  // Stator heating, from the drive units' own 10 Hz power frames (0x2E5 front,
+  // 0x266 rear) - the only kW reading of pack heating that decodes on this bus.
+  // The strip prints the two sides as a pair and the HEAT POWER cell as their
+  // sum; statorHeatKw is that sum, computed here so the tab does no arithmetic on
+  // sensor readings.
+  jw.boolean("statorFrontSeen", s.statorFrontSeen);
+  jw.u32("statorFrontAgeMs", s.statorFrontAgeMs);
+  jw.fixed("statorHeatFrontKw", (int32_t)s.statorFrontKwx100, 2);
+  jw.boolean("statorRearSeen", s.statorRearSeen);
+  jw.u32("statorRearAgeMs", s.statorRearAgeMs);
+  jw.fixed("statorHeatRearKw", (int32_t)s.statorRearKwx100, 2);
+  jw.fixed("statorHeatKw",
+           (int32_t)(s.statorFrontKwx100 + s.statorRearKwx100), 2);
+  jw.boolean("heatingActive", s.heatingActive);
+  // Why the engine last switched itself off. The payload is a constant, so a
+  // stator stall is the one failure a field report cannot see in lastTxRaw: the
+  // frame looks correct on the way out and nothing heats. autoOffReason reads
+  // "STATOR_STALL" for exactly that case. This is the ONLY surface of it: the tab
+  // shows the reason in the status chip and paints nothing else -
+  // no red row and no count of the silence - so a stall is read here.
+  jw.string("autoOffReason", preheatAutoOffReasonName(s.autoOffReason));
+  // Per-signal telemetry, each value next to the age of the frame it came from.
+  // The seven signals live in four different IDs, so a single freshness figure
+  // for the card would hide a stale row behind a fresh one.
+  jw.boolean("ptAvgSeen", s.avgSeen);
+  jw.u32("ptAvgAgeMs", s.avgAgeMs);
+  jw.fixed("ptPackAvgC", (int32_t)s.packAvgCx10, 1);
+  jw.boolean("ptMaxPackSeen", s.maxPackSeen);
+  jw.u32("ptMaxPackAgeMs", s.maxPackAgeMs);
+  jw.fixed("ptMaxPackC", (int32_t)s.maxPackCx10, 1);
+  jw.boolean("ptFlowReqSeen", s.flowReqSeen);
+  jw.u32("ptFlowReqAgeMs", s.flowReqAgeMs);
+  jw.fixed("ptFlowReqLpm", (int32_t)s.flowReqLpmX4 * 25, 2);
+  jw.boolean("ptCellTargetSeen", s.cellTargetSeen);
+  jw.u32("ptCellTargetAgeMs", s.cellTargetAgeMs);
+  jw.fixed("ptCellTargetC", (int32_t)s.cellTargetCx4 * 25, 2);
+  jw.boolean("ptHpPowerSeen", s.hpPowerSeen);
+  jw.u32("ptHpPowerAgeMs", s.hpPowerAgeMs);
+  jw.u32("ptHpPowerW", s.hpPowerW);
+  jw.boolean("ptPumpSeen", s.pumpSeen);
+  jw.u32("ptPumpAgeMs", s.pumpAgeMs);
+  jw.u32("ptPumpRpm", s.pumpRpm);
+  // 0x321 byte3 VCFRONT_tempAmbient: the car's own outside-air reading. A witness
+  // for the strip's AMBIENT cell, measured constant per session in the captures
+  // (8.5 C in the reference capture, 11.5 C in a PASSIVE capture).
+  jw.boolean("ptAmbientSeen", s.ambientSeen);
+  jw.u32("ptAmbientAgeMs", s.ambientAgeMs);
+  jw.fixed("ptAmbientC", (int32_t)s.ambientCx10, 1);
+  // 0x252 BMS_maxStationaryHeatPower: a permission from the BMS, not a flow.
+  jw.boolean("ptHeatLimitSeen", s.heatSeen);
+  jw.u32("ptHeatLimitAgeMs", s.heatAgeMs);
+  jw.fixed("ptHeatLimitKw", (int32_t)s.heatKwx100, 2);
+  // Diagnostics past the contract, for the read-only support card.
+  jw.u32("echoCount", s.echoCount);
+  jw.u32("latUs", s.latUs);
+  jw.u32("lastTxAgeMs", s.lastTxAgeMs);
+  jw.u32("maxTxGapMs", s.maxTxGapMs);
+  jw.u32("autoOffCount", s.autoOffCount);
+  jw.string("lastSkipReason", preheatSkipReasonName(s.lastSkipReason));
+  jw.u32("skipDisabled", preheatRuntimeSkipCount(PREHEAT_SKIP_DISABLED));
+  jw.u32("skipUnsupported", preheatRuntimeSkipCount(PREHEAT_SKIP_UNSUPPORTED));
+  jw.u32("skipBootDelay", preheatRuntimeSkipCount(PREHEAT_SKIP_BOOT_DELAY));
+  jw.u32("skipWarmup", preheatRuntimeSkipCount(PREHEAT_SKIP_WARMUP));
+  jw.u32("skipBusSilent", preheatRuntimeSkipCount(PREHEAT_SKIP_BUS_SILENT));
+  jw.u32("skipNoTripId", preheatRuntimeSkipCount(PREHEAT_SKIP_NO_TRIP_ID));
+  // Immediate reassertion, counted per armed session. carConflict is how many of
+  // the car's own trip frames disagreed with ours, replyTx how many of them we
+  // answered, replyLat* how long that took from the car's frame. heatDrops counts
+  // hot->cold edges of the heat witness while transmitting, heatDropsNearCar those
+  // within 3 s of a disagreeing car frame - the field verdict on this revision.
+  jw.u32("carConflict", s.carConflict);
+  jw.u32("replyTx", s.replyTx);
+  jw.u32("replyFail", s.replyFail);
+  jw.u32("replyLatLastMs", s.replyLatLastMs);
+  jw.u32("replyLatMaxMs", s.replyLatMaxMs);
+  jw.u32("heatDrops", s.heatDrops);
+  jw.u32("heatDropsNearCar", s.heatDropsNearCar);
+  // Thermal schematic: the tab's own drawing of the service "Thermal" screen. Each
+  // value carries the age of its source frame (UINT32_MAX = never seen); the tab
+  // prints a dash for anything older than its window (5 s for the 10 Hz frames,
+  // 15 s for the slow ones). C and LPM are x10 fixed point.
+  jw.u32("thVitalsAgeMs", s.thVitalsAgeMs);
+  jw.u32("thPumpBatRpm", s.thPumpBatRpm);
+  jw.u32("thPumpPtRpm", s.thPumpPtRpm);
+  jw.u32("thFanRpm", s.thFanRpm);
+  // Coolant valve, 0x201 index 1: where it is (0 SERIES, 1 PARALLEL, 2 BLEND,
+  // 3 AMBIENT_SOURCE) and what the heat pump asks (2 SERIES_BYPASS, 4 AMBIENT...);
+  // thHeatPump from 0x3A1 says Octovalve (true) or the legacy 4-way valve.
+  jw.u32("thModeAgeMs", s.thModeAgeMs);
+  jw.u32("thValveMode", s.thValveMode);
+  jw.u32("thHpReq", s.thHpReq);
+  jw.u32("thSysAgeMs", s.thSysAgeMs);
+  jw.boolean("thHeatPump", s.thHeatPump);
+  jw.u32("thInletsAgeMs", s.thInletsAgeMs);
+  jw.fixed("thBatInletC", s.thBatInletCx10, 1);
+  jw.fixed("thPtInletC", s.thPtInletCx10, 1);
+  jw.u32("thFlowsAgeMs", s.thFlowsAgeMs);
+  jw.fixed("thFlowBatLpm", (int32_t)s.thFlowBatLpmX10, 1);
+  jw.fixed("thFlowPtLpm", (int32_t)s.thFlowPtLpmX10, 1);
+  jw.u32("thPcsAgeMs", s.thPcsAgeMs);
+  jw.fixed("thDcdcC", s.thDcdcCx10, 1);
+  jw.fixed("thChargerC", s.thChargerCx10, 1);
+  jw.u32("thInvFrontAgeMs", s.thInvFrontAgeMs);
+  jw.i32("thInvFrontC", s.thInvFrontC);
+  jw.u32("thInvRearAgeMs", s.thInvRearAgeMs);
+  jw.i32("thInvRearC", s.thInvRearC);
+  jw.u32("thApAgeMs", s.thApAgeMs);
+  jw.i32("thApC", s.thApC);
+  jw.u32("thInfoAgeMs", s.thInfoAgeMs);
+  jw.i32("thInfoC", s.thInfoC);
+  // True once more answers went out in a second than the car could ever ask for:
+  // a loop, and the engine then runs on the 10 Hz frame alone for the session.
+  jw.boolean("replyBreaker", s.replyBreaker);
+  jw.finish();
+  return j;
+}
+
+static void httpPreheatStats() {
+  server.send(200, "application/json", preheatStatsToJson());
+}
+
+static void httpPreheatSet() {
+  const bool hasEnabled = server.hasArg("enabled");
+  const bool hasTarget = server.hasArg("targetC");
+  if (!hasEnabled && !hasTarget) {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"error\":\"enabled or targetC is required\"}");
+    return;
+  }
+  bool enabled = false;
+  if (hasEnabled && !httpBoolArg("enabled", enabled)) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid enabled\"}");
+    return;
+  }
+  int32_t targetCx10 = 0;
+  if (hasTarget &&
+      !httpDecimalTenthsInRange(server.arg("targetC"), PREHEAT_TARGET_MIN_CX10,
+                                PREHEAT_TARGET_MAX_CX10, targetCx10)) {
+    server.send(400, "application/json",
+                "{\"ok\":false,\"error\":\"targetC must be 20.0..50.0\"}");
+    return;
+  }
+  // Turning the engine off is always allowed, so an unsupported profile can
+  // still be returned to a safe state.
+  if (((hasEnabled && enabled) || hasTarget) &&
+      !activeProfilePreheatSupported()) {
+    server.send(409, "application/json",
+                "{\"ok\":false,\"error\":\"preheat requires the Vehicle/Body CAN\"}");
+    return;
+  }
+  if (hasTarget && !preheatSetTargetCx10(targetCx10)) {
+    server.send(500, "application/json",
+                "{\"ok\":false,\"error\":\"Settings could not be saved\"}");
+    return;
+  }
+  if (hasEnabled && !preheatSetEnabled(enabled)) {
+    server.send(500, "application/json",
+                "{\"ok\":false,\"error\":\"Settings could not be saved\"}");
+    return;
+  }
+  server.send(200, "application/json", preheatStatsToJson());
 }
 
 static String summonHeartbeatOverrideStatsToJson() {
@@ -4233,10 +5215,6 @@ static void httpR79ApControlStats() {
 }
 
 static void httpR79ApControlUpdate() {
-  if (!labMenuEnabled) {
-    server.send(403, "application/json", "{\"error\":\"lab-disabled\"}");
-    return;
-  }
   if (!server.hasArg("enabled") || !server.hasArg("mode") ||
       !server.hasArg("delaySeconds") || !server.hasArg("allowManualDriving")) {
     server.send(400, "application/json", "{\"error\":\"missing-ap-control-setting\"}");
@@ -4264,6 +5242,12 @@ static void httpR79ApControlUpdate() {
 
 static void httpR79Stats() { server.send(200, "application/json", r79StatsToJson()); }
 static void httpR79Update() {
+  if (server.hasArg("mode") || server.hasArg("mode2Reinject") ||
+      server.hasArg("mode2DelayMs")) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"r79-mode-fixed-to-1\"}");
+    return;
+  }
+
   if (server.hasArg("hw3Enabled")) {
     // One scalar transaction; do not partially commit a mixed settings request.
     if (server.hasArg("mode") || server.hasArg("bit18Mode") ||
@@ -4289,38 +5273,23 @@ static void httpR79Update() {
     server.send(200, "application/json", r79StatsToJson());
     return;
   }
-  const bool hasMode = server.hasArg("mode");
   const bool hasBit18 = server.hasArg("bit18Mode");
   const bool hasMode1Wait = server.hasArg("mode1TxWaitMode");
   const bool hasMode1Reinject = server.hasArg("mode1Reinject");
   const bool hasMode1Delay = server.hasArg("mode1DelayMs");
-  const bool hasMode2Reinject = server.hasArg("mode2Reinject");
-  const bool hasMode2Delay = server.hasArg("mode2DelayMs");
-  if (!hasMode && !hasBit18 && !hasMode1Wait && !hasMode1Reinject && !hasMode1Delay &&
-      !hasMode2Reinject && !hasMode2Delay) {
+  if (!hasBit18 && !hasMode1Wait && !hasMode1Reinject && !hasMode1Delay) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"missing-r79-setting\"}");
     return;
   }
-  uint8_t nextMode, nextBit18, nextMode1Wait;
-  bool nextMode1Reinject, nextMode2Reinject;
-  uint16_t nextMode1Delay, nextMode2Delay;
+  uint8_t nextBit18, nextMode1Wait;
+  bool nextMode1Reinject;
+  uint16_t nextMode1Delay;
   portENTER_CRITICAL(&r79LabMux);
-  nextMode = r79TransportMode;
   nextBit18 = r79Bit18Policy;
   nextMode1Wait = r79Mode1TxWaitMode;
   nextMode1Reinject = r79Mode1ReinjectEnabled;
   nextMode1Delay = r79Mode1DelayMs;
-  nextMode2Reinject = r79Mode2ReinjectEnabled;
-  nextMode2Delay = r79Mode2DelayMs;
   portEXIT_CRITICAL(&r79LabMux);
-  if (hasMode) {
-    const String raw = server.arg("mode");
-    if (raw != "1" && raw != "2") {
-      server.send(400, "application/json", "{\"ok\":false,\"error\":\"mode-must-be-1-or-2\"}");
-      return;
-    }
-    nextMode = (uint8_t)raw.toInt();
-  }
   if (hasBit18) {
     const String raw = server.arg("bit18Mode");
     if (raw != "0" && raw != "1") {
@@ -4355,61 +5324,34 @@ static void httpR79Update() {
     }
     nextMode1Delay = raw;
   }
-  if (hasMode2Reinject) {
-    const String raw = server.arg("mode2Reinject");
-    if (raw != "0" && raw != "1" && raw != "false" && raw != "true") {
-      server.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid-mode2Reinject\"}");
-      return;
-    }
-    nextMode2Reinject = httpBoolValue(raw, HttpBoolPolicy::LegacyOneTrue);
-  }
-  if (hasMode2Delay) {
-    const String rawText = server.arg("mode2DelayMs");
-    uint16_t raw = 0u;
-    if (!r79DelayTextParsePure(
-            rawText.c_str(), R79_MODE2_DELAY_MAX_MS_PURE, raw)) {
-      server.send(400, "application/json", "{\"ok\":false,\"error\":\"mode2DelayMs-must-be-0-to-2000\"}");
-      return;
-    }
-    nextMode2Delay = raw;
-  }
-
-  uint8_t currentMode, currentBit18, currentMode1Wait;
-  bool currentMode1Reinject, currentMode2Reinject;
-  uint16_t currentMode1Delay, currentMode2Delay;
+  uint8_t currentBit18, currentMode1Wait;
+  bool currentMode1Reinject;
+  uint16_t currentMode1Delay;
   portENTER_CRITICAL(&r79LabMux);
-  currentMode = r79TransportMode;
   currentBit18 = r79Bit18Policy;
   currentMode1Wait = r79Mode1TxWaitMode;
   currentMode1Reinject = r79Mode1ReinjectEnabled;
   currentMode1Delay = r79Mode1DelayMs;
-  currentMode2Reinject = r79Mode2ReinjectEnabled;
-  currentMode2Delay = r79Mode2DelayMs;
   portEXIT_CRITICAL(&r79LabMux);
   const bool onlyMode1ReinjectChanged =
       nextMode1Reinject != currentMode1Reinject &&
-      nextMode == currentMode && nextBit18 == currentBit18 &&
+      nextBit18 == currentBit18 &&
       nextMode1Wait == currentMode1Wait &&
-      nextMode1Delay == currentMode1Delay &&
-      nextMode2Reinject == currentMode2Reinject &&
-      nextMode2Delay == currentMode2Delay;
+      nextMode1Delay == currentMode1Delay;
   const bool disablingMode1Reinject =
       currentMode1Reinject && !nextMode1Reinject;
 
-  const R79CfgSnapshot next = {nextBit18, nextMode, nextMode1Wait,
-      nextMode1Reinject, nextMode1Delay, nextMode2Reinject, nextMode2Delay};
+  const R79CfgSnapshot next = {nextBit18, nextMode1Wait,
+      nextMode1Reinject, nextMode1Delay};
   if (!r79CfgPersistCandidate(next)) {
     server.send(500, "application/json", "{\"ok\":false,\"error\":\"Settings could not be saved\"}"); return;
   }
   if (!onlyMode1ReinjectChanged) setCanTxAdministrativeHold(true);
   portENTER_CRITICAL(&r79LabMux);
-  r79TransportMode = r79ModeSanitizePure(nextMode);
   r79Bit18Policy = r79Bit18PolicySanitizePure(nextBit18);
   r79Mode1TxWaitMode = r79Mode1WaitModeSanitizePure(nextMode1Wait);
   r79Mode1ReinjectEnabled = nextMode1Reinject;
   r79Mode1DelayMs = r79FixedQuietDelaySanitizePure(nextMode1Delay);
-  r79Mode2ReinjectEnabled = nextMode2Reinject;
-  r79Mode2DelayMs = r79Mode2DelaySanitizePure(nextMode2Delay);
   r79FixedQuietState = {};
   if (onlyMode1ReinjectChanged) {
     if (disablingMode1Reinject &&
@@ -4422,7 +5364,6 @@ static void httpR79Update() {
       r79RetryGeneration = 0u;
     }
   } else {
-    r79Mode2DelayedState = {};
     r79RetryPending = false;
     r79RetryIndex = 0;
     r79RetryOriginKind = R79LAB_TX_NONE;
@@ -4505,8 +5446,8 @@ static void httpUlcUpdate() {
   server.send(200, "application/json", ulcStatsToJson());
 }
 
+
 static void httpAutoLaneChangeLabStats() {
-  if (!httpRequireLab()) return;
   server.send(200, "application/json", ulcStatsToJson());
 }
 
@@ -4550,7 +5491,6 @@ static void httpVisionControlUpdate() {
 
 
 static void httpAutoLaneChangeLabUpdate() {
-  if (!httpRequireLab()) return;
   const bool hasEnabled = server.hasArg("enabled");
   const bool hasBus = server.hasArg("bus");
   if (!hasEnabled && !hasBus) {
@@ -5639,12 +6579,21 @@ static void webTask(void *arg) {
   server.on("/api/system/factory-reset", HTTP_POST, httpFactoryReset);
   server.on("/api/system/reset-nvs-keep-ble", HTTP_POST, httpResetNvsPreserveS3xyBle);
   server.on("/api/system/reboot", HTTP_POST, httpRebootP4Can);
+  server.on("/api/system/can-gpio", HTTP_GET, httpCanGpioStatus);
+  server.on("/api/system/can-gpio", HTTP_POST, httpCanGpioSet);
   server.on("/api/wifi/status", HTTP_GET, httpWifiStatus);
   server.on("/api/wifi/apply", HTTP_POST, httpWifiApply);
   server.on("/api/ota/status", HTTP_GET, httpOtaStatus);
   server.on("/update", HTTP_POST, httpOtaFinish, httpOtaUpload);
 
   if (!vehicleProfileSetupMode && !vehicleProfileNvsError) {
+    server.on("/api/service-mode/stats",HTTP_GET,httpServiceSettingsStats);
+    server.on("/api/service-mode/enter",HTTP_POST,httpServiceSettingsEnter);
+    server.on("/api/service-mode/restore",HTTP_POST,httpServiceSettingsRestore);
+    server.on("/api/smartshift/stats",HTTP_GET,httpGearShiftStatus);
+    server.on("/api/smartshift/update",HTTP_POST,httpGearShiftConfig);
+    server.on("/api/fsd/stats", HTTP_GET, httpFsdSettingsStats);
+    server.on("/api/fsd/update", HTTP_POST, httpFsdSettingsUpdate);
     server.on("/api/snapshot", HTTP_GET, httpSnapshot);
     if (activeProfileNagSupported()) {
       server.on("/api/nag/config", HTTP_GET, httpNagConfig);
@@ -5683,13 +6632,18 @@ static void webTask(void *arg) {
               httpSummonHeartbeatOverrideUpdate);
     server.on("/api/features/status", HTTP_GET, httpFeatureStatus);
     server.on("/api/features/lab", HTTP_POST, httpFeatureLab);
+    server.on("/api/features/preheat", HTTP_POST, httpFeaturePreheat);
+    server.on("/api/preheat/stats", HTTP_GET, httpPreheatStats);
+    server.on("/api/preheat/set", HTTP_POST, httpPreheatSet);
     server.on("/api/features/door-cancel", HTTP_POST, httpFeatureDoorCancel);
     server.on("/api/features/ap-drive-profile", HTTP_POST, httpFeatureApDriveProfile);
-    server.on("/api/features/banned", HTTP_POST, httpFeatureBanned);
-    server.on("/api/features/tlssc-restore", HTTP_POST, httpFeatureTlsscRestore);
     server.on("/api/features/s3xy", HTTP_POST, httpFeatureS3xy);
     server.on("/api/das/stats", HTTP_GET, httpDasTelemetryStats);
     server.on("/api/r79/stats", HTTP_GET, httpR79Stats);
+    server.on("/api/r79/timing/status", HTTP_GET, httpP4R79TimingStatus);
+    server.on("/api/r79/timing/start", HTTP_POST, httpP4R79TimingStart);
+    server.on("/api/r79/timing/stop", HTTP_POST, httpP4R79TimingStop);
+    server.on("/api/r79/timing/csv", HTTP_GET, httpP4R79TimingCsv);
     server.on("/api/r79/update", HTTP_POST, httpR79Update);
     server.on("/api/r79/ap-control/stats", HTTP_GET, httpR79ApControlStats);
     server.on("/api/r79/ap-control/update", HTTP_POST, httpR79ApControlUpdate);
@@ -5723,6 +6677,7 @@ static void webTask(void *arg) {
     server.on("/api/pedalmap/set", HTTP_POST, httpPedalMapSet);
     server.on("/api/system/stats", HTTP_GET, httpSystemStats);
     server.on("/api/system/boot-capture.csv", HTTP_GET, httpBootCaptureCsv);
+    server.on("/api/system/can-errors.json", HTTP_GET, httpCanErrorsJson);
     server.on("/api/system/cana-tx.csv", HTTP_GET, httpCanATxTraceCsv);
     server.on("/api/system/canb-tx.csv", HTTP_GET, httpCanBTxTraceCsv);
     server.on("/api/system/reset-stats", HTTP_POST, httpResetRuntimeStats);
@@ -5750,6 +6705,9 @@ static void webTask(void *arg) {
 
   for (;;) {
     server.handleClient();
+    p4R79TimingDriverPoll();
+    researchCaptureService();
+    preheatSettingsService();
     webBeat++;
     vTaskDelay(1);
   }

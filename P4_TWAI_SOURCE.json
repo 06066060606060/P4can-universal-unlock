@@ -1,0 +1,17 @@
+{
+  "tag": "v5.5.5",
+  "commit": "b774170ff46c393eeb5e495ea37936038d3f4f4f",
+  "url": "https://raw.githubusercontent.com/espressif/esp-idf/v5.5.5/components/hal/twai_hal_v1.c",
+  "sha256": "2ea3ddf64d7fc97bbae7f5f826994e95c01c7c63ea4ee881bcf39fbbb6d50734",
+  "bytes": 20894,
+  "sdk": "Arduino-ESP32 3.3.12 ESP32-P4",
+  "interception": "single original ECC read at existing HAL consumer; no new ISR; fixed internal RAM record",
+  "sdkHeaders": {
+    "include/hal/include/hal/twai_hal.h": "4cf0e8fb6cce99d53c6846215d58d877d1f28880481702002f751590e4ca3de5",
+    "include/hal/esp32p4/include/hal/twai_ll.h": "956a93599098bae284bc856b1edb9d8614479336ac224f4d6c8606743d9902fe",
+    "include/hal/include/hal/twai_types.h": "027ed41b930bcddb68e6b8aa6705be61761d2cae0b9b3bfa8f2a643f351da09a",
+    "sdkconfig": "9c776200408fa46d17d8b3e18d89328059d2d6ebcc52d4a0e296bcf9f15205f0",
+    "qio_qspi/include/sdkconfig.h": "d22029ff6e5870ca70f5e3065f3e9cd2e99c2c05ad0dbb73fb848189e063cd2b"
+  },
+  "captureHelperSha256": "97a4baefbf47ba0d37846ca2be2a4cbb0a4bff3b315004c55a2048f2871cfe65"
+}

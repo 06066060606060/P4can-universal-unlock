@@ -1,0 +1,45 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.33.1",
+  "scope": "Exact reviewed YL CAN2 passive-mode and counter-meaning edits only; invert before existing v3.31.8/GPIO byte contracts. Extra edits outside these unique contextual hunks fail. New helper behavior is covered by runtime fixtures.",
+  "files": {
+    "@sketch": {
+      "baseSha256": "1f8054ee1160a4b06d1cb1103b6fc041505148040ed514bf11f8c217370b2ad0",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.33.1 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.33.2 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.1\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.33.2\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        },
+        {
+          "before": "    allCanReady = ready && allCanReady;\n    Serial.printf(\"[P4-CAN] CAN%u %s TWAI%u TX%d RX%d %s: %s\\n\", bus + 1,\n        p4CanRoleName(bus), bus, p4CanTxPins[bus], p4CanRxPins[bus],\n        canUsbPassive() ? \"LISTEN_ONLY\" : \"NORMAL\", esp_err_to_name(p4CanInitError[bus]));\n  }\n  nativeAReady = p4CanOnline[p4CanBusA()];\n  twaiReady = p4CanOnline[p4CanBusB()];\n",
+          "after": "    allCanReady = ready && allCanReady;\n    Serial.printf(\"[P4-CAN] CAN%u %s TWAI%u TX%d RX%d %s: %s\\n\", bus + 1,\n        p4CanRoleName(bus), bus, p4CanTxPins[bus], p4CanRxPins[bus],\n        p4CanPassive[bus] ? \"LISTEN_ONLY\" : \"NORMAL\", esp_err_to_name(p4CanInitError[bus]));\n  }\n  nativeAReady = p4CanOnline[p4CanBusA()];\n  twaiReady = p4CanOnline[p4CanBusB()];\n"
+        }
+      ]
+    },
+    "p4_can.h": {
+      "baseSha256": "1f83a67fe9fe327ed5fc9d73f1fb42cc55afdb30ebb3b84f7a17815338dfc9ef",
+      "hunks": [
+        {
+          "before": "#include \"can_error_diag_macros.h\"\n#include \"can_gpio_pure.h\"\n#include \"r79_timing_capture_pure.h\"\n\n#ifndef P4_R79_TIMING_RX\n#define P4_R79_TIMING_RX(bus, frame) ((void)0)\n",
+          "after": "#include \"can_error_diag_macros.h\"\n#include \"can_gpio_pure.h\"\n#include \"r79_timing_capture_pure.h\"\n#include \"p4_can_mode_pure.h\"\n\n#ifndef P4_R79_TIMING_RX\n#define P4_R79_TIMING_RX(bus, frame) ((void)0)\n"
+        },
+        {
+          "before": "static bool p4CanInstall(uint8_t bus, bool passive, uint32_t txQueueLength = 32) {\n  if (bus >= P4_CAN_COUNT || p4CanHandles[bus]) return false;\n  if (!p4CanGpioValid) { p4CanInitError[bus] = ESP_ERR_INVALID_STATE; return false; }\n  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT_V2(\n      bus, (gpio_num_t)p4CanTxPins[bus], (gpio_num_t)p4CanRxPins[bus],\n      passive ? TWAI_MODE_LISTEN_ONLY : TWAI_MODE_NORMAL);\n  g.rx_queue_len = 256;\n  g.tx_queue_len = txQueueLength;\n  g.alerts_enabled = TWAI_ALERT_TX_FAILED | TWAI_ALERT_ERR_PASS |\n      TWAI_ALERT_BUS_ERROR | TWAI_ALERT_BUS_OFF | TWAI_ALERT_RX_QUEUE_FULL;\n  twai_timing_config_t t = p4CanConfiguredTiming().timing;\n  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();\n  p4CanPassive[bus] = passive;\n  p4CanInitError[bus] = twai_driver_install_v2(&g, &t, &f, &p4CanHandles[bus]);\n  if (p4CanInitError[bus] != ESP_OK) return false;\n  P4_CAN_DIAG_EPOCH(bus);\n",
+          "after": "static bool p4CanInstall(uint8_t bus, bool passive, uint32_t txQueueLength = 32) {\n  if (bus >= P4_CAN_COUNT || p4CanHandles[bus]) return false;\n  if (!p4CanGpioValid) { p4CanInitError[bus] = ESP_ERR_INVALID_STATE; return false; }\n  const bool effectivePassive = p4CanReceiveOnlyPure(activeProfileIsYl(), bus, passive);\n  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT_V2(\n      bus, (gpio_num_t)p4CanTxPins[bus], (gpio_num_t)p4CanRxPins[bus],\n      effectivePassive ? TWAI_MODE_LISTEN_ONLY : TWAI_MODE_NORMAL);\n  g.rx_queue_len = 256;\n  g.tx_queue_len = txQueueLength;\n  g.alerts_enabled = TWAI_ALERT_TX_FAILED | TWAI_ALERT_ERR_PASS |\n      TWAI_ALERT_BUS_ERROR | TWAI_ALERT_BUS_OFF | TWAI_ALERT_RX_QUEUE_FULL;\n  twai_timing_config_t t = p4CanConfiguredTiming().timing;\n  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();\n  p4CanPassive[bus] = effectivePassive;\n  p4CanInitError[bus] = twai_driver_install_v2(&g, &t, &f, &p4CanHandles[bus]);\n  if (p4CanInitError[bus] != ESP_OK) return false;\n  P4_CAN_DIAG_EPOCH(bus);\n"
+        }
+      ]
+    },
+    "web_api.h": {
+      "baseSha256": "29837103d35a9349f9f7746bc28f1c3cacddbea730892257d2c53a77a38cdf68",
+      "hunks": [
+        {
+          "before": "      number(\"RxMissed\", p4CanMissed[bus]); number(\"RxOverrun\", p4CanOverrun[bus]);\n      if (details) {\n        if (!traffic) text(\"DriverCounterLifetime\", \"DRIVER_INSTALL\");\n        number(\"Tec\", p4CanTec[bus]); number(\"Rec\", p4CanRec[bus]);\n        number(\"BusErrors\", p4CanBusErrors[bus]); number(\"ArbLost\", p4CanArbLost[bus]);\n        number(\"DriverTxFailed\", p4CanDriverTxFailed[bus]);\n",
+          "after": "      number(\"RxMissed\", p4CanMissed[bus]); number(\"RxOverrun\", p4CanOverrun[bus]);\n      if (details) {\n        if (!traffic) text(\"DriverCounterLifetime\", \"DRIVER_INSTALL\");\n        flag(\"ErrorCountersFrozen\", p4CanPassive[bus]);\n        number(\"Tec\", p4CanTec[bus]); number(\"Rec\", p4CanRec[bus]);\n        number(\"BusErrors\", p4CanBusErrors[bus]); number(\"ArbLost\", p4CanArbLost[bus]);\n        number(\"DriverTxFailed\", p4CanDriverTxFailed[bus]);\n"
+        }
+      ]
+    }
+  }
+}

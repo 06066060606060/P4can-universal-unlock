@@ -1,0 +1,27 @@
+{
+  "basePackage": "P4-CAN-Universal-v3.34.5",
+  "files": {
+    "@sketch": {
+      "baseSha256": "06e34c0c5dab3c27a20139dee7669835e643830827cef24b9e9274706a1479fb",
+      "hunks": [
+        {
+          "before": "// P4-CAN Universal v3.34.5 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n",
+          "after": "// P4-CAN Universal v3.34.6 - Model 3/Y / Model YL firmware\n\n#include <Arduino.h>\n#include <WiFi.h>\n"
+        },
+        {
+          "before": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.5\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n",
+          "after": "#include \"text_format_arduino.h\"\n#include \"json_writer_arduino.h\"\n\n#define FW_VERSION \"v3.34.6\"\n\n#include \"continuous_ap_fsm_pure.h\"\n#include \"p4can_core_state.h\"\n"
+        }
+      ]
+    },
+    "can_runtime.h": {
+      "baseSha256": "98cd52d2aeff8b3c203d24bbcfae7941090fdc312bb6750e1820c8dbaeb5f848",
+      "hunks": [
+        {
+          "before": "    // A bounded queue wait wakes on arrival instead of sleeping after idle\n    // polling. Only a first-wait timeout proves a blocking opportunity;\n    // zero-wait drain timeouts must not reset continuous-run fairness.\n    if (r79ServiceWorkDueSnapshot((uint32_t)millis())) {\n      // Count this runnable service toward the same fairness epoch as RX.\n      // The following idle receive still blocks, even if refresh is busy or\n      // an unseen native MUX boundary keeps the due work fenced.\n      if (!runnableBurstActive) {\n        runnableBurstActive = true;\n        runnableBurstStartMs = (uint32_t)millis();\n      }\n      r79ServiceCheckpoint();\n    }\n    esp_err_t rxResult = p4CanReceiveRaw(p4CanBusB(), &f, 1);\n    const esp_err_t firstRxResult = rxResult;\n    uint32_t stockRxMs = (uint32_t)millis();\n    if (firstRxResult == ESP_ERR_TIMEOUT) {\n",
+          "after": "    // A bounded queue wait wakes on arrival instead of sleeping after idle\n    // polling. Only a first-wait timeout proves a blocking opportunity;\n    // zero-wait drain timeouts must not reset continuous-run fairness.\n    // Already queued input owns the first opportunity. A due retry can spend\n    // its bounded admission wait before returning, so service it here only\n    // after a nonblocking receive actually found no frame.\n    esp_err_t rxResult = p4CanReceiveRaw(p4CanBusB(), &f, 0);\n    if (rxResult == ESP_ERR_TIMEOUT) {\n      if (r79ServiceWorkDueSnapshot((uint32_t)millis())) {\n        // Count this runnable service toward the same fairness epoch as RX.\n        // The following idle receive still blocks, even if refresh is busy or\n        // an unseen native MUX boundary keeps the due work fenced.\n        if (!runnableBurstActive) {\n          runnableBurstActive = true;\n          runnableBurstStartMs = (uint32_t)millis();\n        }\n        r79ServiceCheckpoint();\n      }\n      countryRxEpoch = canTxEpochSnapshot();\n      rxResult = p4CanReceiveRaw(p4CanBusB(), &f, 1);\n    }\n    const esp_err_t firstRxResult = rxResult;\n    uint32_t stockRxMs = (uint32_t)millis();\n    if (firstRxResult == ESP_ERR_TIMEOUT) {\n"
+        }
+      ]
+    }
+  }
+}

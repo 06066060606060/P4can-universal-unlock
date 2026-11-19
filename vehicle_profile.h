@@ -30,16 +30,15 @@ struct VehicleProfileSpec {
   const char *name;
   VehicleCanTopology defaultTopology;
   TurnSignalVariant defaultTurn;
-  bool tlsscRestoreSupported;
 };
 
 static inline const VehicleProfileSpec *vehicleProfileSpec(uint8_t id) {
   static const VehicleProfileSpec specs[] = {
-    {VEHICLE_MODEL_YL, "Model Y L", VEHICLE_TOPOLOGY_TRIPLE_YL, TURN_SIGNAL_STALK, false},
-    {VEHICLE_MODEL_Y_JUNIPER, "Model Y Juniper", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_STALK, true},
-    {VEHICLE_MODEL_Y_LEGACY, "Model Y Legacy", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_STALK, true},
-    {VEHICLE_MODEL_3_HIGHLAND, "Model 3 Highland", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_UNSET, true},
-    {VEHICLE_MODEL_3_LEGACY, "Model 3 Legacy", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_STALK, true}
+    {VEHICLE_MODEL_YL, "Model Y L", VEHICLE_TOPOLOGY_TRIPLE_YL, TURN_SIGNAL_STALK},
+    {VEHICLE_MODEL_Y_JUNIPER, "Model Y Juniper", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_STALK},
+    {VEHICLE_MODEL_Y_LEGACY, "Model Y Legacy", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_STALK},
+    {VEHICLE_MODEL_3_HIGHLAND, "Model 3 Highland", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_UNSET},
+    {VEHICLE_MODEL_3_LEGACY, "Model 3 Legacy", VEHICLE_TOPOLOGY_TRIPLE_STANDARD, TURN_SIGNAL_STALK}
   };
   for (const auto &s : specs) if ((uint8_t)s.id == id) return &s;
   return nullptr;
@@ -191,6 +190,47 @@ static inline bool vehicleProfileApDriveProfileSupported(uint8_t id, uint8_t top
   return vehicleProfilePedalMapSupported(id, topology);
 }
 
+// ---------------------------------------------------------------------------
+// Vehicle/Body (VH) bus resolver.
+//
+// This bus carries every frame the battery-preheat feature needs:
+//   0x082 UI_tripPlanning   (RX source frame / TX target)
+//   0x212 BMS_status        (bmsSeen, precondition flags)
+//   0x241 VCFRONT_coolant   (battery coolant flow + flow reason)
+//   0x252 BMS_powerAvailable(max stationary heat power)
+//   0x2E1 VCFRONT_status    (isActiveHeatingBattery, mux 0)
+//   0x332 BattBrickMinMax   (pack temperature min/max, mux 0)
+//
+// YL original VH is VEHICLE; the additional bus is BODY. P4_BODY remains
+// the historical internal identity for CAN1. PARTY is a different bus and
+// never carries these frames. The physical channel therefore depends on the
+// topology:
+//   TRIPLE_STANDARD -> BODY is logical A, physical CAN1 / TWAI0
+//   TRIPLE_YL       -> VEHICLE is logical B, physical CAN1 / TWAI0
+//
+// This is exactly the 0x334 pedal-map requirement, so it is reused rather than
+// duplicated: PedalMap is the existing feature that already encodes "is the
+// Vehicle/Body bus reachable, and on which channel".
+static inline bool vehicleProfileVehicleBusSupported(uint8_t id, uint8_t topology) {
+  return vehicleProfilePedalMapSupported(id, topology);
+}
+
+static inline bool vehicleProfileVehicleBusOnCanA(uint8_t id, uint8_t topology) {
+  return vehicleProfileTopologyValid(id, topology) &&
+         topology == VEHICLE_TOPOLOGY_TRIPLE_STANDARD;
+}
+
+static inline bool vehicleProfileVehicleBusOnCanB(uint8_t id, uint8_t topology) {
+  return vehicleProfileTopologyValid(id, topology) &&
+         id == VEHICLE_MODEL_YL && topology == VEHICLE_TOPOLOGY_TRIPLE_YL;
+}
+
+// Battery preheat uses the same BODY capability as PedalMap. All five P4
+// profiles provide BODY; retired two-bus configurations remain unsupported.
+static inline bool vehicleProfilePreheatSupported(uint8_t id, uint8_t topology) {
+  return vehicleProfileVehicleBusSupported(id, topology);
+}
+
 // Experimental 0x3F8 UI_ulcStalkConfirm override is supported on every valid
 // Universal dual-CAN topology. Model YL keeps its fixed validated route; every
 // other Model 3/Y profile can select physical CAN A or CAN B in LAB, default B.
@@ -205,18 +245,6 @@ static inline bool vehicleProfileUlcNoConfirmSupported(uint8_t id, uint8_t topol
 static inline bool vehicleProfileNagGateDependsOnCanB(uint8_t id, uint8_t topology) {
   return vehicleProfileNagSupported(id, topology) &&
          vehicleProfileCanBIsChassis(id, topology);
-}
-
-static inline bool vehicleProfileTlsscRestoreSupported(uint8_t id) {
-  const VehicleProfileSpec *s = vehicleProfileSpec(id);
-  return s && s->tlsscRestoreSupported;
-}
-
-// Banned Car is intentionally hidden/blocked on Model Y L in v3.2 hotfix.
-// Keep this separate from TLSSC Restore capability so it can be re-enabled
-// deliberately later without weakening the current backend guard.
-static inline bool vehicleProfileBannedCarSupported(uint8_t id) {
-  return id != VEHICLE_MODEL_YL && vehicleProfileTlsscRestoreSupported(id);
 }
 
 static inline bool vehicleProfileTurnValid(uint8_t id, uint8_t topology, uint8_t turn) {
@@ -244,7 +272,7 @@ static inline const char *vehicleProfileName(uint8_t id) {
 
 static inline const char *vehicleProfileTopologyName(uint8_t topology) {
   switch (topology) {
-    case VEHICLE_TOPOLOGY_TRIPLE_YL: return "BODY + CHASSIS + PARTY (YL)";
+    case VEHICLE_TOPOLOGY_TRIPLE_YL: return "VEHICLE + BODY + PARTY (YL)";
     case VEHICLE_TOPOLOGY_TRIPLE_STANDARD: return "BODY + CHASSIS + PARTY";
     case VEHICLE_TOPOLOGY_RETIRED_PARTY_CHASSIS: return "PARTY + CHASSIS";
     default: return "DISABLED";
@@ -258,7 +286,7 @@ static inline const char *vehicleProfileCanAName(uint8_t id, uint8_t topology) {
 
 static inline const char *vehicleProfileCanBName(uint8_t id, uint8_t topology) {
   if (!vehicleProfileTopologyValid(id, topology)) return "DISABLED";
-  return topology == VEHICLE_TOPOLOGY_TRIPLE_YL ? "BODY" : "CHASSIS";
+  return topology == VEHICLE_TOPOLOGY_TRIPLE_YL ? "VEHICLE" : "CHASSIS";
 }
 
 static inline const char *turnSignalVariantName(uint8_t turn) {
@@ -352,6 +380,18 @@ static inline bool activeProfileApDriveProfileSupported() {
   return vehicleProfileApDriveProfileSupported(activeVehicleProfile, activeVehicleTopology);
 }
 
+static inline bool activeProfilePreheatSupported() {
+  return vehicleProfilePreheatSupported(activeVehicleProfile, activeVehicleTopology);
+}
+
+static inline bool activeProfileVehicleBusOnCanA() {
+  return vehicleProfileVehicleBusOnCanA(activeVehicleProfile, activeVehicleTopology);
+}
+
+static inline bool activeProfileVehicleBusOnCanB() {
+  return vehicleProfileVehicleBusOnCanB(activeVehicleProfile, activeVehicleTopology);
+}
+
 static inline bool activeProfileUlcNoConfirmSupported() {
   return vehicleProfileUlcNoConfirmSupported(activeVehicleProfile, activeVehicleTopology);
 }
@@ -370,14 +410,6 @@ static inline bool activeProfileEuUnlockSupported() {
 
 static inline bool activeProfileDmsNagSupported() {
   return vehicleProfileDmsNagSupported(activeVehicleProfile, activeVehicleTopology);
-}
-
-static inline bool activeProfileTlsscRestoreSupported() {
-  return vehicleProfileTlsscRestoreSupported(activeVehicleProfile);
-}
-
-static inline bool activeProfileBannedCarSupported() {
-  return vehicleProfileBannedCarSupported(activeVehicleProfile);
 }
 
 static inline const char *activeProfileCanAName() {

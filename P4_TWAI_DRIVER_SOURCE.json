@@ -1,0 +1,19 @@
+{
+  "tag": "v5.5.5",
+  "commit": "b774170ff46c393eeb5e495ea37936038d3f4f4f",
+  "url": "https://raw.githubusercontent.com/espressif/esp-idf/b774170ff46c393eeb5e495ea37936038d3f4f4f/components/driver/twai/twai.c",
+  "sha256": "7680a0ef354cd67dc1add8c636675482f7f7c39123d13597f4a4ced3756d96bc",
+  "bytes": 38204,
+  "sdk": "Arduino-ESP32 3.3.12 ESP32-P4",
+  "patch": "Preserve malformed RX DLC guard; add explicit guarded R79 priority slot per controller, priority-first TX completion dispatch, atomic normal queue publication/accounting, bounded unlocked normal admission polling and lifecycle invalidation. Exact reviewed hunks are inverted and checked against the pinned upstream source. Add controller-loaded TX shadow and bounded explicit R79 lifecycle capture with native lifecycle retirement and copied source tags.",
+  "sdkHeaders": {
+    "include/driver/twai/include/driver/twai.h": "d7982784094ea9f1f3e04d1fb643ce66ae2c267a7bc3ec2bb872e12d568f0768",
+    "include/hal/include/hal/twai_hal.h": "4cf0e8fb6cce99d53c6846215d58d877d1f28880481702002f751590e4ca3de5",
+    "include/hal/esp32p4/include/hal/twai_ll.h": "956a93599098bae284bc856b1edb9d8614479336ac224f4d6c8606743d9902fe",
+    "include/hal/include/hal/twai_types.h": "027ed41b930bcddb68e6b8aa6705be61761d2cae0b9b3bfa8f2a643f351da09a",
+    "include/hal/include/hal/twai_types_deprecated.h": "e5b2a36a0829fde4ec9c1a27c0de8aea2edab014550a87d428416e569b5042be",
+    "include/soc/esp32p4/include/soc/soc_caps.h": "4aba7eaad13804d97e6cf8ff4cfe965e4892438fab43eb1fc18193eb072ad651",
+    "sdkconfig": "9c776200408fa46d17d8b3e18d89328059d2d6ebcc52d4a0e296bcf9f15205f0",
+    "qio_qspi/include/sdkconfig.h": "d22029ff6e5870ca70f5e3065f3e9cd2e99c2c05ad0dbb73fb848189e063cd2b"
+  }
+}

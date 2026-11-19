@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import hashlib
+from diagnostic_inverse import approved_base_bytes
 import json
 import re
 import subprocess
@@ -168,15 +169,28 @@ class SecurityHost(unittest.TestCase):
    self.assertEqual(result.returncode,0,result.stdout+result.stderr)
    print(result.stdout,end='')
 
- def test_package_identity_and_preserved_net2_runtime(self):
+ def test_package_identity_and_preserved_base_runtime(self):
   version=ROOT.name.replace('P4-CAN-Universal-','',1)
   sketch=ROOT/(ROOT.name+'.ino')
   actual=re.search(r'^#define FW_VERSION "([^"\n]+)"',sketch.read_text(),re.M).group(1)
   self.assertEqual(actual,version)
   baseline=json.loads((ROOT/'SOURCE_BASELINE.json').read_text())
-  self.assertEqual(baseline['source_fw_version'],'v3.29.1-P4-3TWAI-net2')
-  for relative in baseline['preserved_runtime_members']+['dashboard_source.html']:
-   self.assertEqual(hashlib.sha256((ROOT/relative).read_bytes()).hexdigest(),baseline['original_source_sha256'][relative],relative)
+  self.assertEqual(baseline['basePackage'],'P4-CAN-Universal-v3.30.1')
+  # This diagnostic patch intentionally adds transport/guard/web observations.
+  # Retain byte-level protection for all other inherited production headers/C.
+  observed={'index_html.h','can_runtime.h','p4can_forward.h','vehicle_profile.h','web_api.h','s3xy_ble.h','p4_can.h','nvs_keep_ble_reset_pure.h','nvs_checked.h','vehicle_logic.h','preheat_runtime.h','can_busoff_persistence.h','can_usb_logger.h','continuous_ap_runtime.h','can_core.h'}
+  protected=[relative for relative in baseline['files']
+             if relative.endswith(('.h','.c')) and not relative.startswith('tests/')
+             and relative not in observed]
+  self.assertGreater(len(protected),40)
+  for relative in protected:
+   data=approved_base_bytes(relative,(ROOT/relative).read_bytes())
+   if relative == 'pin_config.h':
+    # Retain all unrelated board/network definitions byte-for-byte.
+    self.assertIn(b'#define CAN_CHASSIS_TX 50',data)
+    self.assertIn(b'#define CAN_CHASSIS_RX 49',data)
+    data=data.replace(b'#define CAN_CHASSIS_TX 50',b'#define CAN_CHASSIS_TX 22').replace(b'#define CAN_CHASSIS_RX 49',b'#define CAN_CHASSIS_RX 23')
+   self.assertEqual(hashlib.sha256(data).hexdigest(),baseline['files'][relative],relative)
 
  def test_operational_security_call(self):
   self._run_production_call()

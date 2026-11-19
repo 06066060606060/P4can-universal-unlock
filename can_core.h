@@ -360,12 +360,12 @@ static bool canMaintenanceActive() {
 static void setCanTxAdministrativeHold(bool hold) {
   if (!canTxBarrierMutex) {
     canTxAdministrativeRequested = hold;
-    canTxAdministrativeHold = hold || canMaintenanceActive() || canUsbTxHeld();
+    __atomic_store_n(&canTxAdministrativeHold, hold || canMaintenanceActive() || canUsbTxHeld(), __ATOMIC_RELEASE);
     return;
   }
   if (xSemaphoreTake(canTxBarrierMutex, portMAX_DELAY) == pdTRUE) {
     canTxAdministrativeRequested = hold;
-    canTxAdministrativeHold = hold || canMaintenanceActive() || canUsbTxHeld();
+    __atomic_store_n(&canTxAdministrativeHold, hold || canMaintenanceActive() || canUsbTxHeld(), __ATOMIC_RELEASE);
     xSemaphoreGive(canTxBarrierMutex);
   }
 }
@@ -385,7 +385,7 @@ static esp_err_t canTxTwaiTransmitWithMaskTagged(
   esp_err_t err = ESP_ERR_INVALID_STATE;
   if (!canTxAdministrativeHold && twaiReady &&
       canTxBarrierAllowsMaskedPure(canTxBarrierState, expectedEpoch, requiredFreshMask))
-    err = p4CanSendB(msg, 0);
+    err = p4CanSendB(msg, 0, traceSource);
   xSemaphoreGive(canTxBarrierMutex);
   canBTraceRecordTx(msg, err, traceSource);
   return err;
@@ -432,7 +432,7 @@ static esp_err_t canTxTwaiTransmitWithMaskTaggedGuarded(
       canTxCancellationGenerationSnapshot(generation) == expectedGeneration &&
       canTxBarrierAllowsMaskedPure(
           canTxBarrierState, expectedEpoch, requiredFreshMask))
-    err = p4CanSendB(msg, 0);
+    err = p4CanSendB(msg, 0, traceSource);
   xSemaphoreGive(canTxBarrierMutex);
   canBTraceRecordTx(msg, err, traceSource);
   return err;
@@ -524,7 +524,7 @@ static bool canTxNativeASendTagged(const struct CanFrame *msg,
   esp_err_t traceResult = ESP_FAIL;
 
   if (allowed) {
-    errOut = p4CanSendFrame(msg);
+    errOut = p4CanSendFrame(msg, traceSource);
     traceResult = errOut;
     reason = nativeATxResultReasonPure(
         true, true, true, canTxBarrierState.epoch, canTxBarrierState.freshMask,
@@ -572,7 +572,7 @@ static bool canTxNativeASendTaggedGuarded(
   const bool allowed = generationValid && reason == NATIVE_A_TX_OK;
   esp_err_t traceResult = ESP_FAIL;
   if (allowed) {
-    errOut = p4CanSendFrame(msg);
+    errOut = p4CanSendFrame(msg, traceSource);
     traceResult = errOut;
     reason = nativeATxResultReasonPure(
         true, true, true, canTxBarrierState.epoch,

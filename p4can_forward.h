@@ -196,7 +196,9 @@ static bool setTlsscEnabled(bool enabled, bool persist);
 static bool setAutoBlinkerEnabled(bool enabled, bool persist);
 static void toggleTlsscEnabledFromButton();
 static void toggleAutoBlinkerEnabledFromButton();
+static void togglePreheatEnabledFromButton();
 static bool requestTurnSignalPulseFromButton(uint8_t dir);
+static bool requestApLaneChangeFromButton(uint8_t dir);
 static void handlePedalMap334OnCanB(const twai_message_t &src);
 static void handlePedalMap334OnCanA(const struct CanFrame &src);
 static String pedalMapStatsJson();
@@ -216,6 +218,8 @@ static void handleDriverWindowLab3C2CanB(const twai_message_t &incoming);
 static void driverWindowLabResetRuntime();
 static void driverWindowLabResetRuntimeUnderTxBarrier();
 static void driverWindowLabServiceTick();
+static void preheatRuntimeResetUnderTxBarrier();
+static void preheatRuntimeTick();
 static bool r79FreshGearRawLocked(uint32_t now, uint8_t &rawOut);
 static void tsl9InputObserveCanA(const struct CanFrame &incoming);
 static void tsl9InputObserveCanB(const twai_message_t &incoming);
@@ -243,7 +247,6 @@ static bool lab3f8AutosteerGateOpen(uint32_t now);
 static bool lab3f8AnyOverrideSelected();
 static void injectDriverAssistControl(const twai_message_t &src);
 static bool injectUlcSnooze3fdMux1(const twai_message_t &src);
-static void doInjectTlsscRestore(const twai_message_t &src);
 static R79RuntimeStatus r79RuntimeStatusSnapshot(uint32_t now);
 static bool r79LabTransmitShadow(const uint8_t *stock, uint32_t now, uint8_t txKind);
 static void r79LabRetryTick();
@@ -335,6 +338,7 @@ static bool recoveryStartCanTasks();
 static bool recoveryHardReinitialize(uint8_t reason, uint8_t diagReason);
 static void canSupervisorTask(void* arg);
 
+static bool canMaintenanceActive();
 static bool prepareCanForMaintenance();
 static void restartP4CanSafely();
 
@@ -342,3 +346,5 @@ static inline bool continuousApOwnsInputRoute(ContApRoute route);
 
 static inline bool continuousApValidateNagCanA(struct CanFrame *out,void *arg);
 static inline bool continuousApValidateNagCanB(twai_message_t *out,void *arg);
+
+static bool toggleFsdSettingsFromButton();

@@ -114,8 +114,9 @@ struct ResearchRawCopyPlan {
 };
 
 // Plan a chronological copy from a wrapped PRE ring. The production path uses
-// the result for at most two bulk memcpy operations instead of one archive
-// append per CAN frame.
+// the result to reserve an archive range for bounded deferred copies. The
+// reference time must be sampled under the same lock as producers (no future
+// entries); retained history spans less than one millis() rollover.
 template <typename Entry>
 static inline ResearchRawCopyPlan researchRawCopyPlanPure(
     const Entry *ring, uint32_t capacity, uint32_t start, uint32_t frameCount,
@@ -124,19 +125,18 @@ static inline ResearchRawCopyPlan researchRawCopyPlanPure(
   if (!ring || capacity == 0 || frameCount == 0 || start >= capacity) return out;
   if (frameCount > capacity) frameCount = capacity;
 
-  uint32_t skip = 0;
-  while (skip < frameCount) {
-    const uint32_t idx = (start + skip) % capacity;
-    if ((uint32_t)(triggerNow - ring[idx].timestampMs) <= preWindowMs) break;
-    skip++;
+  // Ages are monotonically non-increasing in insertion order, including
+  // millis() rollover. Find the first in-window entry without scanning N rows.
+  uint32_t lo = 0, hi = frameCount;
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2U;
+    if ((uint32_t)(triggerNow - ring[(start + mid) % capacity].timestampMs) > preWindowMs)
+      lo = mid + 1U;
+    else
+      hi = mid;
   }
-  out.ringStart = (start + skip) % capacity;
-  uint32_t eligible = 0;
-  while (skip + eligible < frameCount) {
-    const uint32_t idx = (start + skip + eligible) % capacity;
-    if ((uint32_t)(triggerNow - ring[idx].timestampMs) > preWindowMs) break;
-    eligible++;
-  }
+  out.ringStart = (start + lo) % capacity;
+  const uint32_t eligible = frameCount - lo;
   out.count = eligible < archiveAvailable ? eligible : archiveAvailable;
   out.truncated = out.count < eligible;
   return out;
