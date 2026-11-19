@@ -58,7 +58,7 @@ Multiple operating modes supporting five vehicle profiles for Model 3/Y/YL.
 
 Recommended setup for maximum performance and stability:
 
-- ESP32-P4 + 3 × SN65HVD230
+- ESP32-P4-C6 with 3 × SN65HVD230
 - 120-ohm resistors removed
 - High-speed mode enabled
 
