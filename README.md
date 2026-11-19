@@ -2,25 +2,25 @@
 
 The ultimate solution for accessing all features using an ESP32-P4/C6 board + 3 × SN65HVD230 CAN transceivers.
 
-DOESN'T WORK CORRECTLY BEFORE 2026.20 Update
+DOESN'T WORK CORRECTLY BEFORE 2026.20 Update  
 
-[Dashboard Simulation](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.html)
-[仪表板模拟](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.zh-CN.html)
+[Dashboard Simulation](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.html)  
+[仪表板模拟](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.zh-CN.html)  
 
-**Update 3.35.2**
-- Added GPIO Settings.
-- Added Battery Preheating Beta.
-- Added experimental SmartShift feature from github.com/kl79613/P4Can-automatic-shifting
-- Add FSD visualisation settings. (This will block AP & cause some autopark error!)  
-- Added the S3XY action FSD Visualisation.
-- Added Service mode entry.
-- Organized settings for a better overview
-- Added S3XY actions AP Lane Change
-- Added zh-CN Variant
-  and many more improvements check the changelog.
+**Update 3.35.2**  
+- Added GPIO Settings.  
+- Added Battery Preheating Beta.  
+- Added experimental SmartShift feature from github.com/kl79613/P4Can-automatic-shifting  
+- Add FSD visualisation settings. (This will block AP & cause some autopark error!)    
+- Added the S3XY action FSD Visualisation.  
+- Added Service mode entry.  
+- Organized settings for a better overview  
+- Added S3XY actions AP Lane Change  
+- Added zh-CN Variant  
+  and many more improvements check the changelog.  
 
 
-**Highlights:**
+**Highlights:**  
 
 - Nag-killer
 - Advanced EAP (automatically activates the turn signal in NOA)
