@@ -225,6 +225,7 @@ POLICY=r'''
 #define portEXIT_CRITICAL(x) ((void)(x))
 static int stateMux=0;
 static bool canTxAdministrativeHold=false,twaiReady=true,gateSummoning=false;
+static bool r79PostApOffHold=false;
 static bool dasAutopilotStateValid=false;
 static uint8_t dasAutopilotState4=0;
 static R79ManualSuppressionPure r79ManualSuppression{};
@@ -246,6 +247,8 @@ int main(){
  r79ManualSuppression.gearRaw=TESLA_GEAR_R;assert(!r79FastReactiveGateOpen(&why)&&why==p4_r79_timing::MANUAL_R);
  gateSummoning=true;assert(r79FastReactiveGateOpen(&why)&&why==p4_r79_timing::NONE);gateSummoning=false;
  r79ApGateConfig.allowManualDriving=true;assert(r79FastReactiveGateOpen(&why));
+ r79PostApOffHold=true;assert(!r79FastReactiveGateOpen(&why)&&why==p4_r79_timing::POLICY_GATE);
+ r79PostApOffHold=false;assert(r79FastReactiveGateOpen(&why));
  r79ManualSuppression.active=false;
  for(uint8_t reason:{R79_AP_GATE_BLOCKED_PURE,R79_AP_GATE_WAITING_PURE,R79_AP_GATE_UNKNOWN_PURE}){
   apDecision={false,reason,100};assert(!r79FastReactiveGateOpen(&why));

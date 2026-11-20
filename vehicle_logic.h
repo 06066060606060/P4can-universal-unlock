@@ -11,8 +11,9 @@ static bool r79DmsApplyFinal(uint8_t *data);
 // ═══════════════════════════════════════════════════════════════
 // R79 POLICY / SUMMON UNLOCK
 // v3.6 beta 2: R79 is default-on after a real stock 0x3FD mux1 template
-// is captured. Injection is suspended only for positively confirmed manual
-// Drive/Reverse. AP, Summon, Park, Neutral and unknown/stale state remain ON.
+// is captured. Injection is suspended for positively confirmed manual
+// Drive/Reverse. After AP disengagement, a separate hold blocks R79 until
+// active AP, confirmed Summon or fresh real Park returns; boot policy is unchanged.
 // bit19 is fixed 0; bit47 is 1 unless Legacy V12/V13 HW3 selects STOCK.
 // bit18 remains an independent option.
 // ═══════════════════════════════════════════════════════════════
@@ -45,6 +46,7 @@ struct R79RuntimeStatus {
   bool summonSessionActive;
   bool remoteStartupEvidence;
   bool manualLatchActive;
+  bool postApOffHold;
   R79ApGateDecisionPure apGate;
 };
 
@@ -463,6 +465,9 @@ static volatile uint32_t gear186Ms = 0;
 // transient unknown DAS/gear observations. AP, confirmed Summon, P/N, profile
 // reset or relevant CAN recovery clears this latch.
 static R79ManualSuppressionPure r79ManualSuppression = {};
+// stateMux owns this transition latch. D/R confirmation, unknown gear and the
+// manual-driving override cannot reopen it after a received AP disengagement.
+static bool r79PostApOffHold = false;
 
 static volatile uint32_t sumTxOk     = 0;
 static volatile uint32_t sumTxFail   = 0;
@@ -1571,6 +1576,8 @@ static void updateR79ManualSuppressionLocked(
   const bool dasValid = dasAutopilotStateValid;
   const bool apActive = dasStateApActivePure(dasValid, dasAutopilotState4);
   const bool manualState = dasStateManualPure(dasValid, dasAutopilotState4);
+  if (apActive || gateSummoning || (gearValid && gearRaw == TESLA_GEAR_P))
+    r79PostApOffHold = false;
   const bool remoteStartupEvidence = r79RemoteStartupEvidenceLocked(now);
   r79ApGateObserveLocked(now);
   r79ManualSuppressionUpdatePure(
@@ -1580,8 +1587,8 @@ static void updateR79ManualSuppressionLocked(
       gateSummoning, remoteStartupEvidence);
   const bool authorizationOpen = r79TxDecisionPure(
       apActive, gateSummoning, r79ManualSuppression,
-      r79ApGateConfig.allowManualDriving).txEnabled;
-  // Revoke any admitted R79 priority frame when manual driving closes the gate.
+      r79ApGateConfig.allowManualDriving).txEnabled && !r79PostApOffHold;
+  // Revoke admitted R79 priority work when manual driving or AP exit closes authorization.
   if (!authorizationOpen && __atomic_load_n(
           &countryOverrideR79AuthorizationOpen, __ATOMIC_ACQUIRE))
     __atomic_add_fetch(&r79ApGateGeneration, 1u, __ATOMIC_ACQ_REL);
@@ -1635,11 +1642,13 @@ static R79RuntimeStatus r79RuntimeStatusSnapshot(uint32_t now) {
   manual = r79ManualSuppression;
   allowManualDriving = r79ApGateConfig.allowManualDriving;
   out.manualLatchActive = manual.active;
+  out.postApOffHold = r79PostApOffHold;
   out.apGate = r79ApGateDecisionLocked(now);
   apActive = dasStateApActivePure(out.dasValid, out.dasState4);
   portEXIT_CRITICAL(&stateMux);
 
   out.decision = r79TxDecisionPure(apActive, out.summonSessionActive, manual, allowManualDriving);
+  out.decision.txEnabled = out.decision.txEnabled && !out.postApOffHold;
 
   if (canTxAdministrativeHold) out.state = R79_TX_STATE_ADMIN_HOLD;
   else if (!twaiReady) out.state = R79_TX_STATE_CAN_OFFLINE;
@@ -3013,6 +3022,7 @@ static void handle921(const uint8_t *data, uint8_t dlc) {
     wasNoa = gateNOAActive;
     wasScrollAp = dasStateApActivePure(dasAutopilotStateValid, dasAutopilotState4);
     r79ApGateObserveLocked(now);
+    if (wasAp && !ap) r79PostApOffHold = true;
     gateAPActive = ap;
     gateNOAActive = noa;
     dasAutopilotState4 = dasState4;
@@ -3023,6 +3033,11 @@ static void handle921(const uint8_t *data, uint8_t dlc) {
     lastDASStatusMillis = now;
     refreshSummonDerivedStateLocked(now, countryBarrierLocked);
     portEXIT_CRITICAL(&stateMux);
+    // Cancel delayed/retry work and revoke the native pending priority slot
+    // under the enqueue barrier, even when AP Control itself is bypassed.
+    // The driver rejects old generations before loading hardware; a frame
+    // already transmitting on the physical bus cannot be recalled.
+    if (wasAp && !ap && countryBarrierLocked) mux1CancelPendingLocked();
     countryOverrideAuthorizationBarrierUnlock(countryBarrierLocked);
 
     // Chassis and Party 0x399 share the bit42..45 Hands-On decoder. Sharing
@@ -4165,22 +4180,26 @@ static bool r79FastReactiveGateOpen(uint8_t *diagnosticReason) {
   bool apActive = false;
   bool summonConfirmed = false;
   bool allowManualDriving = false;
+  bool postApOffHold = false;
   R79ManualSuppressionPure manual = {};
   portENTER_CRITICAL(&stateMux);
   apActive = dasStateApActivePure(dasAutopilotStateValid, dasAutopilotState4);
   summonConfirmed = gateSummoning;
   manual = r79ManualSuppression;
   allowManualDriving = r79ApGateConfig.allowManualDriving;
+  postApOffHold = r79PostApOffHold;
   const R79ApGateDecisionPure apDecision = r79ApGateDecisionLocked((uint32_t)millis());
   portEXIT_CRITICAL(&stateMux);
   const R79TxDecisionPure decision = r79TxDecisionPure(apActive, summonConfirmed, manual, allowManualDriving);
-  if (!decision.txEnabled)
+  if (postApOffHold)
+    reason = p4_r79_timing::POLICY_GATE;
+  else if (!decision.txEnabled)
     reason = manual.gearRaw == TESLA_GEAR_R ? p4_r79_timing::MANUAL_R : p4_r79_timing::MANUAL_D;
   else if (!apDecision.allowed)
     reason = apDecision.reason == R79_AP_GATE_BLOCKED_PURE ? p4_r79_timing::AP_BLOCKED :
         apDecision.reason == R79_AP_GATE_WAITING_PURE ? p4_r79_timing::AP_WAITING : p4_r79_timing::AP_UNKNOWN;
   if (diagnosticReason) *diagnosticReason = reason;
-  return decision.txEnabled && apDecision.allowed;
+  return !postApOffHold && decision.txEnabled && apDecision.allowed;
 }
 
 static void r79FastReactiveRecordTxState(esp_err_t err, uint32_t now) {

@@ -36,7 +36,7 @@ assert 'data-panel="panelR79"' in html
 # Settings retain their original navigation and inline root controls.
 settings=re.search(r'<main\b[^>]*data-page="settings"[^>]*>(.*?)</main>',html,re.S).group(1)
 assert not re.search(r'class="[^"]*\b(?:settingsCategory|categoryReveal|settingsItem)\b',settings), 'Settings rows must retain the original visible layout'
-expected_features=['panelNag','panelVisionControl','panelBlink','panelSummon','panelR79','panelCountry','panelTlssc','panelAutoLaneChange','panelUlc','panelPedalMap','panelContinuousAp','panelApDriveProfile','panelSmartShift','panelBatteryPreheat']
+expected_features=['panelNag','panelVisionControl','panelBlink','panelSummon','panelR79','panelCountry','panelTlssc','panelAutoLaneChange','panelUlc','panelPedalMap','panelContinuousAp','panelApDriveProfile','panelSmartShift','panelLighting','panelBatteryPreheat']
 expected_system=['panelAbout','panelWireless','panelCanGpio','panelDiag','panelResearchCapture','panelOta','panelServiceMode']
 assert re.findall(r'data-panel="([^"]+)"',settings)==[x for x in expected_features if x not in ('panelR79','panelSmartShift','panelCountry','panelUlc','panelContinuousAp')]+['panelR79','panelFsd','panelSmartShift','panelCountry','panelUlc','panelContinuousAp']+expected_system, '3.29.1 Features/System detail row order; ISA, monitoring, menu and choices remain inline'
 assert re.findall(r'class="sectiontitle">([^<]+)</div>',settings)==['Features','Experimental','System'], 'Original static section headings'
@@ -120,7 +120,7 @@ def original_settings_signature(markup):
   if 'profileChips' in classes or attrs.get('id') in ('bannedDangerHead','bannedDangerZone'):return None
   if 'listrow' in classes and any(n['attrs'].get('id') in ('actionsMenuToggle','labMenuToggle') for n in descendants(node)):return None
   if attrs.get('id')=='serviceModeSettingsCard':return None
-  if attrs.get('id')=='canGpioSettingsRow' or attrs.get('data-panel') in ('panelFsd','panelServiceMode','panelAutoLaneChange','panelSmartShift','panelBatteryPreheat','panelResearchCapture'):return None
+  if attrs.get('id')=='canGpioSettingsRow' or attrs.get('data-panel') in ('panelLighting','panelFsd','panelServiceMode','panelAutoLaneChange','panelSmartShift','panelBatteryPreheat','panelResearchCapture'):return None
   children=[]
   for child in node['children']:
    value=canonical(child) if isinstance(child,dict) else child

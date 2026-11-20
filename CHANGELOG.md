@@ -1,9 +1,19 @@
-# P4-CAN Universal v3.35.2 — 2026-11-19
+# P4-CAN Universal v3.35.3 — 2026-11-19
 
-- Organized settings for a better overview
+
+- Fix R79 injection error after AP disengage/reengage.
+- Add Lighting Features
+- Add AP Forced High Beam and Dynamic Brake Light (Off / Light press / Hard press) to Lighting Features in standard and Chinese dashboards.
+Isolate implementation in lighting/: reuse the supplied pure reference, persist settings in features/lighting, add /api/lighting/stats and /api/lighting/update, observe all three physical RX routes and service from a dedicated task. AP permission requires a driver PUSH, stops on AP exit/staleness, writes BODY 0x3E9 and can send four checksum-correct 0x249 PUSH frames on fresh dark feedback. Dynamic brake uses pedal input, fresh D/speed >8 km/h and only the 0x3E9 brake-request bit. Preserve transport/recovery gates and normal blinker priority. 
+- Add Compile-P4-Variants.cmd / .ps1 to build postv3 and prev3 using the requested 32M flash, app3M_fat9M_16MB partition, PSRAM and USB options. Isolate firmware, compiler work files and logs in build_variants/<variant>; support dry run and report failures.
+
+# P4-CAN Universal v3.35.2 — 2026-11-19
+- Add S3XY actions AP Right Lane Change (UP_2=4) and AP Left Lane Change (DOWN_2=8), with saved button assignments. Use existing single/legacy blinker transport and TX gates on stalk profiles; retain normal Blinker/Auto Blinker commands. Update dashboard, demo and embedded HTML.
+- Remove LAB Menu, the LAB landing page and LAB bottom navigation. Move CAN Research Capture into System directly below Diagnostics / Recovery with Settings back navigation. Remove its former LAB runtime/API gate, and decouple Auto Lane Change from that removed menu while retaining AP/feature/transport gating. 
+- Add an Experimental Settings card between Features and System. Move FSD Visualisation (Experimental), SmartShift, Country / Map, Lane Change and Continuous AP  into it. Change the Lane Change row subtitle to "Off-Highway lane change", including live rendering. Update demo and embedded dashboard.
+- Replace the Actions Menu by a clickable Battery Preheating Settings entry. Open the existing preheat/thermal controls as a Settings detail panel,
 - Added experimental SmartShift feature from https://github.com/kl79613/P4Can-automatic-shifting
 - Add the S3XY action FSD Visualisation. 
-- Add service mode entry & restore TLSSC
 - Restore Settings > Auto Lane Change Enable. 
 - Add S3XY button support for lane change on standard AP configuration: LEFT emits DOWN_2 (0x8), RIGHT emits UP_2 (0x4).
 

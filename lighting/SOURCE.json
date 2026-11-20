@@ -1,0 +1,20 @@
+{
+  "source_directory": "C:\\Users\\xmick\\Desktop\\light",
+  "files_reviewed": {
+    "albert_v12_light_pure.h": "d6863ac4ad0fea72fd0ec6df1f67962a46f1826158bbae149195323b47182a00",
+    "albert_v12_light_runtime.h": "6681a75822bfde3150fe3fc6aa727673e030eccc5e45fa70b4baa652760a9f40",
+    "lighting_features.h": "40addae176b99494ec7d83af79b522e264855072b93064f6dbaa3bf7081d12d1",
+    "lighting_features_pure.h": "1eeb81402133af6fc8a5a6250287c72bb9133f0e9f14d50be6caba4cf07d8898"
+  },
+  "copied_reference": "lighting_features_pure.h",
+  "active_features": [
+    "AP Forced High Beam (route 1, 0x3E9 + 0x249)",
+    "Dynamic Brake Light"
+  ],
+  "excluded_features": [
+    "Albert V12 high-beam route 2",
+    "strobe",
+    "rear fog",
+    "maintenance mode"
+  ]
+}

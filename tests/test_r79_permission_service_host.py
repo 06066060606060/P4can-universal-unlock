@@ -152,6 +152,7 @@ app=ns['app'].split('int main(){')[0]
 old='static bool r79FastReactiveGateOpen(uint8_t*){return gate && !canTxAdministrativeHold && twaiReady;}\nstatic void r79PriorityLimitDeadline(p4_twai_priority_guard_t&){}'
 assert old in app
 permission=r'''
+static bool r79PostApOffHold=false;
 static R79ApGateConfigPure r79ApGateConfig={true,R79_AP_GATE_BLOCK_PURE,2};
 static R79ApGateSessionPure r79ApGateSession{};
 static R79ManualSuppressionPure r79ManualSuppression{};

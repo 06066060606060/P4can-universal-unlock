@@ -377,6 +377,7 @@ static void p4CanDrainExtra() {
     if ((frame.can_id & 0xc0000000UL) != 0) continue;
     preheatRuntimeIngestPhysical(frame.bus, frame.can_id, frame.can_dlc, frame.data);
     const uint32_t fsdEpoch=canTxEpochSnapshot(), fsdMs=(uint32_t)millis();
+    lightingObserve(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdEpoch,fsdMs);
     fsdSettingsObserve(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdEpoch,fsdMs);
     fsdSettingsExtra(frame,fsdEpoch,fsdMs);
     chinaRestoreEcho(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdEpoch,fsdMs);
@@ -515,6 +516,7 @@ static void canTaskNativeA(void* arg) {
       if ((rxf.can_id & 0xc0000000UL) == 0)
         preheatRuntimeIngestPhysical(rxf.bus, rxf.can_id, rxf.can_dlc, rxf.data);
       if((rxf.can_id&0xc0000000UL)==0){
+        lightingObserve(rxf.bus,rxf.can_id,rxf.can_dlc,rxf.data,countryRxEpoch,prefetchedRxMs[bi]);
         fsdSettingsObserve(rxf.bus,rxf.can_id,rxf.can_dlc,rxf.data,countryRxEpoch,prefetchedRxMs[bi]);
         fsdSettingsExtra(rxf,countryRxEpoch,prefetchedRxMs[bi]);
       }
@@ -719,6 +721,7 @@ static void canTaskTwai(void* arg) {
         const uint32_t r79FrameNowMs = (uint32_t)millis();
         mux1StockClaimed = r79ProcessStockFrame(f, timingMux, r79FrameNowMs);
       }
+      if(!f.extd && !f.rtr) lightingObserve(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
       if(!f.extd && !f.rtr) chinaRestoreEcho(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
       if(!f.extd && !f.rtr) fsdSettingsObserve(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
       // Keep the supervisor heartbeat alive even under sustained CAN B traffic.

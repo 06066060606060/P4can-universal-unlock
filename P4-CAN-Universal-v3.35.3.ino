@@ -79,7 +79,7 @@
 #include "text_format_arduino.h"
 #include "json_writer_arduino.h"
 
-#define FW_VERSION "v3.35.2"
+#define FW_VERSION "v3.35.3"
 
 #include "continuous_ap_fsm_pure.h"
 #include "p4can_core_state.h"
@@ -94,6 +94,7 @@
 #include "automatic_shift/gear_shift_runtime.h"
 #include "continuous_ap_runtime.h"
 #include "preheat_runtime.h"
+#include "lighting/lighting_runtime.h"
 #include "web_api.h"
 #include "can_runtime.h"
 #include "can_usb_logger_task.h"
@@ -227,6 +228,7 @@ void setup() {
   fsdSettingsLoad();
   gearShiftConfigLoad();
   serviceSettingsLoad();
+  lightingSettingsLoad();
   continuousApControlLoad();
   nagCfgLoad();
   summonCfgLoad();
@@ -300,6 +302,7 @@ void setup() {
   bootCaptureMarkOnce(&bootCapCanInitDoneMs);
   if (!recoveryStartCanTasks()) restartP4CanSafely();
   if(xTaskCreatePinnedToCore(gearShiftTask,"autoShift",12288,nullptr,2,nullptr,0)!=pdPASS)restartP4CanSafely();
+  if(xTaskCreatePinnedToCore(lightingTask,"lighting",4096,nullptr,1,nullptr,0)!=pdPASS)restartP4CanSafely();
   bootCaptureMarkOnce(&bootCapCanTasksStartedMs);
 
   BaseType_t retSup = xTaskCreatePinnedToCore(canSupervisorTask, "canSup", 6144, nullptr, 3, &canSupervisorHandle, 0);

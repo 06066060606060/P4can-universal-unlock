@@ -900,7 +900,7 @@ static String ulcStatsToJson() {
 static const char* r79RuntimeReasonNameForUi(const R79RuntimeStatus &status) {
   switch (status.state) {
     case R79_TX_STATE_SUSPENDED:
-      return r79TxReasonNamePure(status.decision.reason);
+      return status.postApOffHold ? "AP OFF" : r79TxReasonNamePure(status.decision.reason);
     case R79_TX_STATE_WAIT_TEMPLATE:
     case R79_TX_STATE_CAN_OFFLINE:
     case R79_TX_STATE_ADMIN_HOLD:
@@ -4608,6 +4608,7 @@ static void httpServiceSettingsEnter(){if(serviceSettingsEnter()!=ESP_OK){server
 static void httpServiceSettingsRestore(){bool enabled;if(!httpBoolArg("enabled",enabled)){server.send(400,"application/json","{\"error\":\"invalid-enabled\"}");return;}if(!serviceSettingsSetRestore(enabled)){server.send(503,"application/json","{\"error\":\"save-failed-or-busy\"}");return;}httpServiceSettingsStats();}
 
 #include "automatic_shift/gear_shift_web.h"
+#include "lighting/lighting_web.h"
 
 static void httpFsdSettingsStats() {
   const uint32_t epoch=canTxEpochSnapshot(), now=(uint32_t)millis();
@@ -6245,6 +6246,7 @@ static String homeSnapshotToJson() {
   jw.boolean("summonSessionActive", r79RuntimeLocal.summonSessionActive);
   jw.boolean("remoteStartupEvidence", r79RuntimeLocal.remoteStartupEvidence);
   jw.boolean("manualLatchActive", r79RuntimeLocal.manualLatchActive);
+  jw.boolean("postApOffHold", r79RuntimeLocal.postApOffHold);
   jw.u32("txOk", r79TxOkLocal);
   jw.u32("txFail", r79TxFailLocal);
   jw.boolean("lastTxValid", r79LastTxValidLocal);
@@ -6587,6 +6589,8 @@ static void webTask(void *arg) {
   server.on("/update", HTTP_POST, httpOtaFinish, httpOtaUpload);
 
   if (!vehicleProfileSetupMode && !vehicleProfileNvsError) {
+    server.on("/api/lighting/stats",HTTP_GET,httpLightingStats);
+    server.on("/api/lighting/update",HTTP_POST,httpLightingUpdate);
     server.on("/api/service-mode/stats",HTTP_GET,httpServiceSettingsStats);
     server.on("/api/service-mode/enter",HTTP_POST,httpServiceSettingsEnter);
     server.on("/api/service-mode/restore",HTTP_POST,httpServiceSettingsRestore);
