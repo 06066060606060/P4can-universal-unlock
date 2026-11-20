@@ -7,9 +7,10 @@ DOESN'T WORK CORRECTLY BEFORE 2026.20 Update
 [Dashboard Simulation](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.html)
 [仪表板模拟](https://06066060606060.github.io/T-Unleash_APP/dashboard_demo.zh-CN.html)
 
-**Update 3.35.3**
-- Added Lighting option (Experimental)
-- Added Fix R79 injection error after AP disengage/reengage.
+**Update 3.35.3**  
+- Added Lighting option (Experimental)  
+- Added Fix R79 injection error after AP disengage/reengage.  
+- 
 **Update 3.35.2**
 - Added GPIO Settings.
 - Added Battery Preheating Beta.
