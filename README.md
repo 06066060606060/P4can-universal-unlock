@@ -102,8 +102,8 @@ esp32:esp32:esp32p4:ChipVariant=prev3,FlashSize=32M,PartitionScheme=app3M_fat9M_
 Check your ESP32-P4 chip revision and build with correct settings: **V1.X or V3.X**.
 
 <p align="left">
-  <img width="295" alt="ESP32-P4 chip revision reference" src="https://github.com/user-attachments/assets/31ea6408-9702-4741-8c8c-eb6e9a7402b7">
-   <img width="309" alt="ESP32-P4 revision screenshot" src="https://github.com/user-attachments/assets/fd9561af-b6ea-43ff-9279-cd1bedd10084">
+  <img width="150" alt="ESP32-P4 chip revision reference" src="https://github.com/user-attachments/assets/31ea6408-9702-4741-8c8c-eb6e9a7402b7">
+   <img width="150" alt="ESP32-P4 revision screenshot" src="https://github.com/user-attachments/assets/fd9561af-b6ea-43ff-9279-cd1bedd10084">
 </p>
 
 
