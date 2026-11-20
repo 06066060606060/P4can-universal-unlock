@@ -123,7 +123,7 @@ Check your ESP32-P4 chip revision and build with correct settings: **V1.X or V3.
 
   **各位，开发这个很不容易，费了好大劲，请大家适当赞赏，让我有持续更新的动力**  
 <p align="left">
-<img width="259" height="259" alt="mm_reward_qrcode_1795204537871" src="https://github.com/user-attachments/assets/2df7fcd3-7b2e-49f7-aa6a-3fccb75e47d9" />
+<img width="159" alt="368" src="https://github.com/user-attachments/assets/003791f1-f670-44b9-8728-73e8b48a24a6" />
 
 </p>
 
