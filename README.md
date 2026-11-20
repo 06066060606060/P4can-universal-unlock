@@ -55,7 +55,7 @@ Multiple operating modes supporting five vehicle profiles for Model 3/Y/YL.
 | CAN 3 PARTY | TWAI 2 | GPIO26 | GPIO27 |
 
 <p align="left">
-  <img width="718" alt="ESP32-P4 wiring diagram" src="https://github.com/user-attachments/assets/7cbf03c8-ebb4-41c9-b624-cad1b8879684">
+  <img width="300" alt="ESP32-P4 wiring diagram" src="https://github.com/user-attachments/assets/7cbf03c8-ebb4-41c9-b624-cad1b8879684">
 </p>
 
 ### Recommended hardware setup
@@ -68,7 +68,7 @@ Recommended setup for maximum performance and stability:
 
 <p align="left">
   <img width="165" alt="SN65HVD230 high-speed mode configuration" src="https://github.com/user-attachments/assets/de1fab24-3905-4dbf-b603-205c5784e361">
-   <img width="500" alt="ESP32-P4 board" src="https://github.com/user-attachments/assets/b2f7f3c3-9c50-4bff-a29d-fbed4a528866">
+   <img width="200" alt="ESP32-P4 board" src="https://github.com/user-attachments/assets/b2f7f3c3-9c50-4bff-a29d-fbed4a528866">
 </p>
 
 Hardware links:
@@ -109,7 +109,7 @@ Check your ESP32-P4 chip revision and build with correct settings: **V1.X or V3.
 
 ## ☕ Support the Project
 
-<p align="center">
+<p align="left">
   <a href="https://tesla-mods.fkey.id/">
     <img height="30" alt="Donate with Crypto" src="https://img.shields.io/badge/Crypto-Donate-F7931A?style=for-the-badge&amp;logo=bitcoin&amp;logoColor=white">
   </a>
