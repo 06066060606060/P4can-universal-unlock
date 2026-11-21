@@ -62,7 +62,7 @@ Multiple operating modes supporting five vehicle profiles for Model 3/Y/YL.
 | CAN 3 PARTY | CAN 3 | GPIO26 | GPIO27 |
 
 <p align="left">
-  <img width="300" alt="ESP32-P4 wiring diagram" src="https://github.com/user-attachments/assets/7cbf03c8-ebb4-41c9-b624-cad1b8879684">
+  <img width="300" alt="697721141-7cbf03c8-ebb4-41c9-b624-cad1b8879684" src="https://github.com/user-attachments/assets/68148b49-c256-4757-8ce5-80724e55a58d" />
 </p>
 
 ### Recommended hardware setup
