@@ -54,6 +54,13 @@ Multiple operating modes supporting five vehicle profiles for Model 3/Y/YL.
 | CAN 2 CHASSIS | TWAI 1 | GPIO22 | GPIO23 |
 | CAN 3 PARTY | TWAI 2 | GPIO26 | GPIO27 |
 
+**For Model Y/YL after April 2026:**(Use YL Profile)  
+| Physical bus | Controller | TX | RX |
+| --- | --- | --- | --- |
+| CAN 1 VH | TWAI 0 | GPIO20 | GPIO21 |
+| CAN 2 BODY | TWAI 1 | GPIO22 | GPIO23 |
+| CAN 3 PARTY | TWAI 2 | GPIO26 | GPIO27 |
+
 <p align="left">
   <img width="300" alt="ESP32-P4 wiring diagram" src="https://github.com/user-attachments/assets/7cbf03c8-ebb4-41c9-b624-cad1b8879684">
 </p>
