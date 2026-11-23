@@ -1,5 +1,8 @@
 # P4-CAN Universal Unlock v3.35.3
 
+[简体中文](zh-CN/README.md) | [English](README.md)
+
+
 The ultimate solution for accessing all features using an ESP32-P4/C6 board + 3 × SN65HVD230 CAN transceivers.
 
 DOESN'T WORK CORRECTLY BEFORE 2026.20 Update
