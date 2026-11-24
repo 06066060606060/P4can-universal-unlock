@@ -32,3 +32,5 @@ static void chinaRestoreEcho(uint8_t bus,uint32_t id,uint8_t dlc,const uint8_t *
   }
   xSemaphoreGive(canTxBarrierMutex);
 }
+
+#include "eap_anti_restart.h"  // EAP anti-restart: cached 0x331 replay for TLSSC Restore

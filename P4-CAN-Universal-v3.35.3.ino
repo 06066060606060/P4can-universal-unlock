@@ -228,6 +228,7 @@ void setup() {
   fsdSettingsLoad();
   gearShiftConfigLoad();
   serviceSettingsLoad();
+  eapNrLoad();  // EAP anti-restart: restore cached patched 0x331 before CAN starts
   lightingSettingsLoad();
   continuousApControlLoad();
   nagCfgLoad();
