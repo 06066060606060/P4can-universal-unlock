@@ -381,6 +381,7 @@ static void p4CanDrainExtra() {
     fsdSettingsObserve(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdEpoch,fsdMs);
     fsdSettingsExtra(frame,fsdEpoch,fsdMs);
     chinaRestoreEcho(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdEpoch,fsdMs);
+    eapNrObserve331(frame.bus,frame.can_id,frame.can_dlc,frame.data,fsdMs);
     if (p4CanOnline[p4CanBusExtra()]) p4CanExtraFresh = true;
     researchCaptureObserve(RESEARCH_CAPTURE_BUS_EXTRA, frame.can_id, frame.can_dlc, frame.data);
     driverMonitorCaptureObserve(2, frame.can_id, frame.can_dlc, frame.data);
@@ -723,6 +724,7 @@ static void canTaskTwai(void* arg) {
       }
       if(!f.extd && !f.rtr) lightingObserve(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
       if(!f.extd && !f.rtr) chinaRestoreEcho(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
+      if(!f.extd && !f.rtr) eapNrObserve331(p4CanBusB(),f.identifier,f.data_length_code,f.data,stockRxMs);
       if(!f.extd && !f.rtr) fsdSettingsObserve(p4CanBusB(),f.identifier,f.data_length_code,f.data,countryRxEpoch,stockRxMs);
       // Keep the supervisor heartbeat alive even under sustained CAN B traffic.
       const uint32_t frameNow = (uint32_t)millis();
@@ -864,6 +866,7 @@ static void canTaskTwai(void* arg) {
     // TX queue. TSL9 input assistance is intentionally lower priority.
     continuousApService(ContApRoute::ChassisB);
     tsl9InputServiceCanB();
+    eapNrTick();  // EAP anti-restart: cached 0x331 replay during power-on window
     const uint32_t captureNow = (uint32_t)millis();
     researchCaptureTick(captureNow);
     driverMonitorCaptureTick(captureNow);

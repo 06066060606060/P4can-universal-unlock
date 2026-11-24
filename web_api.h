@@ -4602,7 +4602,9 @@ static void httpDasTelemetryStats() {
 static void httpServiceSettingsStats(){
   portENTER_CRITICAL(&serviceSettingsMux);const bool enabled=chinaRestoreEnabled;const uint32_t ok=chinaRestoreTxOk,fail=chinaRestoreTxFail;portEXIT_CRITICAL(&serviceSettingsMux);
   String json;JsonWriterArduino jw(json);jw.boolean("ok",true);jw.boolean("chinaRestore",enabled);jw.u32("restoreTxOk",ok);jw.u32("restoreTxFail",fail);
-  jw.boolean("canEnter",!canTxAdministrativeHold&&!canUsbPassive()&&p4CanAllRunning());jw.finish();server.send(200,"application/json",json);
+  jw.boolean("canEnter",!canTxAdministrativeHold&&!canUsbPassive()&&p4CanAllRunning());
+  eapNrStatsAppend(json);  // EAP anti-restart diagnostics (cached 0x331 replay)
+  jw.finish();server.send(200,"application/json",json);
 }
 static void httpServiceSettingsEnter(){if(serviceSettingsEnter()!=ESP_OK){server.send(409,"application/json","{\"error\":\"tx-unavailable\"}");return;}httpServiceSettingsStats();}
 static void httpServiceSettingsRestore(){bool enabled;if(!httpBoolArg("enabled",enabled)){server.send(400,"application/json","{\"error\":\"invalid-enabled\"}");return;}if(!serviceSettingsSetRestore(enabled)){server.send(503,"application/json","{\"error\":\"save-failed-or-busy\"}");return;}httpServiceSettingsStats();}
